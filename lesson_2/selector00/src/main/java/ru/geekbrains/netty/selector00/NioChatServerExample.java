@@ -77,7 +77,7 @@ public class NioChatServerExample implements Runnable {
         System.out.println(serverSocket.getLocalAddress());
 
         SocketChannel client = serverSocket.accept();
-        System.out.println(client.getLocalAddress());
+        System.out.println(client.getRemoteAddress());
 
         String clientName = "Клиент #" + connectionIdGen.getAndUpdate(AtomicNonNegativeIntIncrementator);
         client.configureBlocking(false);
@@ -94,15 +94,22 @@ public class NioChatServerExample implements Runnable {
         SocketChannel client = (SocketChannel) key.channel();
         StringBuilder sb = new StringBuilder();
 
-        ByteBuffer buffer = ByteBuffer.allocate(256);
+        ByteBuffer buffer = ByteBuffer.allocate(5);
         int read;
+
+        // read >  0  - readied some data
+        // read =  0  - no data available
+        // read = -1  - connection closed
+
         while ((read = client.read(buffer)) > 0) {
             buffer.flip();
-            //byte[] bytes = new byte[buffer.limit()];
-            //buffer.get(bytes);
-            sb.append(new String(buffer.array(), StandardCharsets.UTF_8).trim());
 
-            buffer.compact();
+            //sb.append(new String(buffer.array(), StandardCharsets.UTF_8).trim());
+            byte[] bytes = new byte[buffer.limit()];
+            buffer.get(bytes);
+            sb.append(new String(bytes, StandardCharsets.UTF_8).trim());
+
+            buffer.clear();
         }
         String msg;
         if (read < 0) {
