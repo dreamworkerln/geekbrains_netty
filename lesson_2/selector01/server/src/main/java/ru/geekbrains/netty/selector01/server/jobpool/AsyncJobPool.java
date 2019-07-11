@@ -39,7 +39,8 @@ public class AsyncJobPool<T> extends BaseJobPool {
 
         threadFactory.setThreadNamePrefix("AsyncPool-");
 
-        threadPool = (ThreadPoolExecutor)Executors.newCachedThreadPool(threadFactory);
+        //threadPool = (ThreadPoolExecutor)Executors.newCachedThreadPool(threadFactory);
+        threadPool = (ThreadPoolExecutor)Executors.newFixedThreadPool(2);
         this.callback = callback;
     }
 

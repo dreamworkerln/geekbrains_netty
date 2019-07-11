@@ -14,7 +14,7 @@
 
   <modules>
       <module>server</module>
-      <module>connection</module>
+      <module>client</module>
   </modules>
 
   <properties>

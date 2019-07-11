@@ -1,8 +1,10 @@
 package ru.geekbrains.netty.selector01.server;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.nio.ByteBuffer;
+import java.nio.channels.SelectionKey;
 import java.nio.channels.SocketChannel;
 import java.time.Instant;
 import java.util.Iterator;
@@ -12,39 +14,73 @@ import java.util.concurrent.ConcurrentSkipListMap;
 
 
 // ByteBuffer cache for clients
-public class ConnectionList {
+public class ConnectionList implements Iterable<Map.Entry<Integer, ConnectionList.Connection>>{
 
     private static final int BUFFER_SIZE = 3;
-    private static final int ROTTEN_INTERVAL = 10; // sec
+    private static final int ROTTEN_INTERVAL = 10000; // sec
 
     public static class Connection {
 
+        private SelectionKey key;
         private SocketChannel channel;
-        private ByteBuffer buffer;
+        private ByteBuffer readBuffer;
+        private ByteBuffer writeBuffer; //ToDo: Тут надо городить очередь сообщений в случае чата
         private Instant time;
-        private RandomAccessFile file;
+        private ByteBuffer data;        // emulating data(file) needed to be transferred to client
+        private RandomAccessFile file; // not implemented
+
+        private ByteArrayOutputStream bufferStream;
 
 
-        public Connection(SocketChannel channel, Instant time) {
+        public Connection(SelectionKey key, Instant time) {
 
-            this.channel = channel;
-            this.buffer = ByteBuffer.allocate(BUFFER_SIZE);
+            this.key = key;
+            this.channel = (SocketChannel)key.channel();
+            this.readBuffer = ByteBuffer.allocate(BUFFER_SIZE);
+            this.writeBuffer = ByteBuffer.allocate(BUFFER_SIZE);
+            this.bufferStream = new ByteArrayOutputStream();
             this.time = time;
+            this.data = null;
         }
 
-        public ByteBuffer getBuffer() {
-            return buffer;
+        public ByteBuffer getReadBuffer() {
+            return readBuffer;
+        }
+
+        public ByteBuffer getWriteBuffer() {
+            return writeBuffer;
+        }
+
+        public ByteBuffer getData() {
+            return data;
+        }
+
+        public void setData(ByteBuffer data) {
+            this.data = data;
+        }
+
+        public SelectionKey getKey() {
+            return key;
+        }
+
+        public SocketChannel getChannel() {
+            return channel;
+        }
+
+        public ByteArrayOutputStream getBufferStream() {
+            return bufferStream;
         }
     }
 
     private NavigableMap<Integer, Connection> connList = new ConcurrentSkipListMap<>();
     private NavigableMap<Instant, Integer> connTimeList = new ConcurrentSkipListMap<>();
 
-    public void add(int id, SocketChannel channel) {
+    public void add(SelectionKey key) {
 
         Instant now = Instant.now();
-        Connection connection = new Connection(channel, now);
+        Connection connection = new Connection(key, now);
 
+        int id = (int)key.attachment();
         connList.put(id, connection);
         connTimeList.put(now, id);
     }
@@ -98,8 +134,6 @@ public class ConnectionList {
                 } catch (IOException ignored) {}
             }
 
-
-
             connTimeList.remove(connection.time);
         }
         connList.remove(id);
@@ -110,7 +144,7 @@ public class ConnectionList {
      */
     public void removeRotten() {
 
-        System.out.println("Removing rotten comnnections ...");
+        //System.out.println("Removing rotten comnnections ...");
 
         Instant label = Instant.now().minusSeconds(ROTTEN_INTERVAL);
 
@@ -133,6 +167,14 @@ public class ConnectionList {
 
 
         }
+    }
+
+
+
+    @Override
+    public Iterator<Map.Entry<Integer,ConnectionList.Connection>> iterator() {
+
+        return connList.entrySet().iterator();
     }
 
 }
