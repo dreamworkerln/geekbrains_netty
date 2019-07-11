@@ -222,6 +222,8 @@ public class FubarServer implements Runnable {
 
             while ((read = client.read(buffer)) > 0) {
                 buffer.flip();
+                // тут походу двойная буфферизация
+                //ToDo: понять, куда нормально можно писать из ByteBuffer кроме как в файл, чтобы не плодить array[]
                 byte[] bytes = new byte[buffer.limit()];
                 buffer.get(bytes);
                 bufferStream.write(bytes);
@@ -241,6 +243,7 @@ public class FubarServer implements Runnable {
             // Remote endpoint transmit some data:
             else {
 
+                // Что-то прочиталось от клиента
                 // refresh client TTL
                 connectionList.update(id);
 
@@ -263,17 +266,7 @@ public class FubarServer implements Runnable {
                 setInterest(key, SelectionKey.OP_READ);
             }
 
-            System.out.print(msg);
-
-//            // echoing back
-//            msg = key.attachment() + ": " + msg + "\n";
-//            ByteBuffer broadBuffer = ByteBuffer.wrap(msg.getBytes());
-//            jobPool.add(() -> {
-//                writeChannel(key, broadBuffer);
-//                return null;
-//            });
-
-
+            System.out.println("IN: " + msg);
 
             // Update selector
             selector.wakeup();
@@ -320,6 +313,14 @@ public class FubarServer implements Runnable {
             while ((wrote = client.write(buffer)) > 0 &
                    data.remaining() > 0);
 
+            // -------------------------------------------------
+            // Если хоть что-то передалось
+            if (remainingBefore > data.remaining()) {
+                // refresh client TTL
+                connectionList.update(id);
+            }
+            // -------------------------------------------------
+
             // причем, если не отправилось по сети, то в buffer будет лежать кусок
             // (скопированный из data), который так и не отправился
             //
@@ -329,19 +330,10 @@ public class FubarServer implements Runnable {
             // -------------------------------------------------------------------------
             // Remote endpoint close connection
             if (wrote < 0) {
-                String msg = key.attachment() + " отключился\n";
-                System.out.print(msg);
+                System.out.println(key.attachment() + " отключился");
                 client.close();
                 connectionList.remove(id);
             }
-
-
-            // Если хоть что-то передалось
-            if (remainingBefore > data.remaining()) {
-
-            }
-
-
             // -------------------------------------------------------------------------
             // Флудим сокет данными - он не успевает принимать на удаленном конце
             // буффер не отправился целиком
@@ -366,7 +358,6 @@ public class FubarServer implements Runnable {
 
                 // refresh client TTL
                 connectionList.update(id);
-
 
                 connectionList.get(id).setData(null);
 
@@ -408,7 +399,7 @@ public class FubarServer implements Runnable {
 
 
         if (connectionList.get(id).getData() != null) {
-            System.out.print("Внимание - обнаружена попытка одновременной передачи, данные НЕ отправлены");
+            System.out.println("Внимание - обнаружена попытка одновременной передачи, данные НЕ отправлены");
             return;
         }
 

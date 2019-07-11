@@ -15,7 +15,7 @@ import java.util.concurrent.ConcurrentSkipListMap;
 public class ConnectionList implements Iterable<Map.Entry<Integer, Connection>>{
 
     static final int BUFFER_SIZE = 1024; // read and write buffer size
-    private static final int ROTTEN_INTERVAL = 10; // sec
+    private static final int ROTTEN_INTERVAL = 100000000; // sec
 
 
     private NavigableMap<Integer, Connection> connList = new ConcurrentSkipListMap<>();
