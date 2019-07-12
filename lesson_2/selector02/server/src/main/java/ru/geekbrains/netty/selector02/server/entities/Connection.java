@@ -9,6 +9,13 @@ import java.time.Instant;
 
 public class Connection {
 
+
+    public enum Mode {
+        TEXT,
+        BINARY
+    }
+
+
     private SelectionKey key;
     private SocketChannel channel;
     private ByteBuffer readBuffer;  // буффер на чтение
@@ -18,6 +25,12 @@ public class Connection {
 
     private RandomAccessFile file; // работает с readBuffer/writeBuffer при передаче файла
     private ByteArrayOutputStream bufferStream; // работает с readBuffer при приеме текстового сообщения
+
+    // server state (text/binary)
+    private Mode currentMode;  // current mode
+    private Mode nextMode;     // desirable mode on next select loop iteration
+
+
 
 
     public Connection(SelectionKey key, Instant time) {
@@ -29,6 +42,9 @@ public class Connection {
         this.bufferStream = new ByteArrayOutputStream(ConnectionList.BUFFER_SIZE);
         this.time = time;
         this.data = null;
+
+        this.currentMode = Mode.TEXT;
+        this.nextMode = null;
     }
 
     public ByteBuffer getReadBuffer() {
@@ -65,4 +81,14 @@ public class Connection {
     public void setTime(Instant time) {this.time = time;}
 
     public RandomAccessFile getFile() {return file;}
+
+    public void setFile(RandomAccessFile file) {this.file = file;}
+
+    public Mode getCurrentMode() {return currentMode;}
+
+    public void setCurrentMode(Mode currentMode) {this.currentMode = currentMode;}
+
+    public Mode getNextMode() {return nextMode;}
+
+    public void setNextMode(Mode nextMode) {this.nextMode = nextMode;}
 }

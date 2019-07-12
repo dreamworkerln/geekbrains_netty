@@ -1,15 +1,13 @@
-package ru.geekbrains.netty.selector02.server;
+package ru.geekbrains.netty.selector03.server;
 
-import ru.geekbrains.netty.selector02.server.entities.Connection;
-import ru.geekbrains.netty.selector02.server.entities.ConnectionList;
-import ru.geekbrains.netty.selector02.server.entities.jobpool.BlockingJobPool;
-import ru.geekbrains.netty.selector02.server.serverActions.DirectoryReader;
-import static ru.geekbrains.netty.selector02.server.utils.Utils.isNullOrEmpty;
-import static ru.geekbrains.netty.selector02.server.utils.Utils.copyBuffer;
+import ru.geekbrains.netty.selector03.server.entities.Connection;
+import ru.geekbrains.netty.selector03.server.entities.ConnectionList;
+import ru.geekbrains.netty.selector03.server.entities.jobpool.BlockingJobPool;
+import ru.geekbrains.netty.selector03.server.serverActions.DirectoryReader;
+import static ru.geekbrains.netty.selector03.server.utils.Utils.isNullOrEmpty;
+import static ru.geekbrains.netty.selector03.server.utils.Utils.copyBuffer;
 
-import java.io.ByteArrayOutputStream;
-import java.io.IOException;
-import java.io.RandomAccessFile;
+import java.io.*;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.*;
@@ -109,20 +107,17 @@ public class FubarServer implements Runnable {
                         continue;
 
                     if (key.isAcceptable()) {
-                        accept(key);
+                        acceptSocket(key);
                     }
-
-
-
-
 
                     if (key.isReadable()) {
 
+                        // Снипмаем подписку о получении новых данных в сокете
                         // Чтобы не бегать бесконечно в цикле select
-                        // Пока потоки из пула читают из сокетов.
+                        // Пока поток из пула читает данные из сокета
                         removeInterest(key, SelectionKey.OP_READ);
 
-                        // Читаем текстовую команду в отдельном потоке
+                        // Читаем данные в отдельном потоке
                         // Затем назначаем ее на выполнение
                         // (выполняться будет потом в другом потоке)
                         SelectionKey finalKey = key;
@@ -130,7 +125,7 @@ public class FubarServer implements Runnable {
 
                             try {
 
-                                String command = readText(finalKey);
+                                String command = readSocket(finalKey);
                                 processCommand(finalKey, command);
 
                                 // Возвращаем подписку на флаг чтения новых данных из сокета
@@ -149,7 +144,7 @@ public class FubarServer implements Runnable {
 
                     // Интерес на запись выставляется отдельно
                     // вручную при желании что-либо передать
-                    // либо внутри writeText(...) если затопился сокет и отправка не удалась
+                    // либо внутри writeSocket(...) если затопился сокет и отправка не удалась
                     if (key.isWritable()) {
 
                         // Чтобы не бегать бесконечно в цикле select
@@ -161,7 +156,7 @@ public class FubarServer implements Runnable {
                         jobPool.add(() -> {
 
                             try {
-                                writeText(finalKey);
+                                writeSocket(finalKey);
                             }
                             catch (Exception e) {
                                 e.printStackTrace();
@@ -179,12 +174,12 @@ public class FubarServer implements Runnable {
 
 
 
-    private void accept(SelectionKey key) {
+    private void acceptSocket(SelectionKey key) {
 
 
         try {
 
-            System.out.println("accept");
+            System.out.println("acceptSocket");
 
             //System.out.println(Thread.currentThread().toString());
 
@@ -205,13 +200,27 @@ public class FubarServer implements Runnable {
             int id = connectionIdGen.getAndUpdate(AtomicNonNegativeIntIncrementator);
             client.configureBlocking(false);
 
+            // регистрируемся на OP_READ на сокете клиента
             SelectionKey clientKey = client.register(selector, SelectionKey.OP_READ, id);
 
             connectionList.add(clientKey);
 
 
-            ByteBuffer welcomeBuf = ByteBuffer.wrap(welcomeString.getBytes());
-            writeChannelText(clientKey, welcomeBuf);
+            //ByteBuffer welcomeBuf = ByteBuffer.wrap(welcomeString.getBytes());
+
+
+            PipedInputStream pipedInputStream = new PipedInputStream();
+            PipedOutputStream pipedOutputStream = new PipedOutputStream();
+            pipedInputStream.connect(pipedOutputStream);
+
+            pipedOutputStream.write(welcomeString.getBytes());
+            //ByteArrayOutputStream outStream = new ByteArrayOutputStream(welcomeString.length());
+            //outStream.write(welcomeString.getBytes());
+
+            ReadableByteChannel data = Channels.newChannel(pipedInputStream);
+
+            // schedule sending greeting
+            scheduleWrite(clientKey, data);
 
             System.out.println("Подключился новый клиент #" + id);
 
@@ -225,33 +234,38 @@ public class FubarServer implements Runnable {
 
     /**
      * Читаем из сокета данные, сколько их там накопилось
-     * (в буффере сокета) к текущему времени
-     * Используется для чтения текстовых комманд небольшой длины
+     * Учитывая длину сообщения из заголовка
      */
-    private String readText(SelectionKey key)  {
+    private String readSocket(SelectionKey key)  {
 
         String result = null;
 
         try {
 
-            SocketChannel client = (SocketChannel) key.channel();
+            SocketChannel client = (SocketChannel)key.channel();
             int id = (int)key.attachment();
+            Connection connection = connectionList.get(id);
 
-            ByteBuffer buffer = connectionList.get(id).getReadBuffer();
+            WritableByteChannel data = connection.getWriteChannel();
+            ByteBuffer buffer = connection.getReadBuffer();
+
+            // подготавливаем буфер для чтения
+            buffer.reset();
+
             int read;
 
             // read >  0  - readied some data
             // read =  0  - no data available
             // read = -1  - connection closed
 
-            ByteArrayOutputStream bufferStream = connectionList.get(id).getBufferStream();
-
-
-            // Читаем данные, доступные в буфере сокета и забиваем на оставшиеся
-            // (по идее их не должно быть)
-            // Соответственно на другом конце не надо много передавать
             while ((read = client.read(buffer)) > 0) {
-                bufferStream.write(buffer.array(), 0, buffer.position());
+
+                // Parse header
+                if (!connection.isHeaderReceived()) {
+                    parseHeader();
+                }
+
+                data.write(buffer);
                 buffer.clear();
             }
 
@@ -282,25 +296,30 @@ public class FubarServer implements Runnable {
         return result;
     }
 
+    private void parseHeader() {
+
+        
+
+    }
 
 
-    private void writeText(SelectionKey key)  {
+
+    private void writeSocket(SelectionKey key)  {
 
         try {
 
-            System.out.println("writeText");
+            System.out.println("writeSocket");
 
-            SocketChannel client = (SocketChannel) key.channel();
+            SocketChannel client = (SocketChannel)key.channel();
             int id = (int)key.attachment();
-
             Connection connection = connectionList.get(id);
 
             ByteBuffer buffer = connection.getWriteBuffer();
-            ByteBuffer data = connection.getData();
+            ReadableByteChannel data = connection.getReadChannel();
 
-            int remainingBefore = data.remaining();
+            boolean someDataHasSend = false;
 
-            int wrote;
+            int wrote = 0;
 
             // wrote  >  0  - wrote some data
             // wrote  =  0  - no data written // need register(selector, SelectionKey.OP_WRITE, id);
@@ -311,16 +330,18 @@ public class FubarServer implements Runnable {
             // и сокет принимает данные (не затопился)
             do {
 
-                buffer.rewind();
-                copyBuffer(data, buffer);
-                buffer.flip();
+                someDataHasSend = (!someDataHasSend) && (wrote > 0);
 
+                // не трогаем буфер
+                // он может содержать данные, которые он не смог отправить в прошлый раз
+                data.read(buffer);
+                buffer.flip();
             }
             while ((wrote = client.write(buffer)) > 0 &
-                   data.remaining() > 0);
+                   buffer.remaining() > 0);
             // -------------------------------------------------
             // Если хоть что-то передалось
-            if (remainingBefore > data.remaining()) {
+            if (someDataHasSend) {
                 // refresh client TTL
                 connectionList.update(id);
             }
@@ -340,19 +361,17 @@ public class FubarServer implements Runnable {
                 connectionList.remove(id);
             }
             // -------------------------------------------------------------------------
+            // Не смоглипередать все данные
             // Флудим сокет данными - он не успевает принимать на удаленном конце
-            // буффер не отправился целиком
-            // Регистрируемся на флаг что удаленный сокет может принимать сообщения
+            // регистрируемся на флаг что удаленный сокет может принимать сообщения
             else if (buffer.remaining() > 0) {
 
-                // Сохранить непереданную часть для следущего цикла передачи
+                // Сохранить непереданный кусок данных для следущего цикла передачи
                 buffer.compact();
 
-                // Выставляем бит OP_WRITE в 1
-                // (подписываемся на флаг готовности сокета отправлять данные)
+                // Выставляем бит OP_WRITE в 1 (подписываемся на флаг готовности сокета отправлять данные)
                 setInterest(key, SelectionKey.OP_WRITE);
-                // В следущем цикле будем отправлять
-                // update selector
+                // update selector (будем отправлять в следущем цикле)
                 selector.wakeup();
 
             }
@@ -364,28 +383,15 @@ public class FubarServer implements Runnable {
                 // refresh client TTL
                 connectionList.update(id);
 
-                connection.setData(null);
+                // Помечаем, что нет данных на передачу
+                connection.setReadChannel(null);
 
                 // prepare buffer to next transmit
                 buffer.clear();
 
-                // Если подписывались на флаг готовности на отправку и успешно отправили
+                // отписываемся от оповещения что сокет может отправлять данные
                 // Выставляем в ключе бит OP_WRITE в 0 (отписываемся)
                 removeInterest(key, SelectionKey.OP_WRITE);
-
-                // Проверяем, не нужно ли переключится в BINARY режим на передачу
-                if (connection.getNextMode() == Connection.Mode.BINARY) {
-
-                    connection.setCurrentMode(connection.getNextMode());
-                    connection.setNextMode(null);
-
-                    setInterest(key, SelectionKey.OP_WRITE);
-                    // В следущем цикле будем отправлять бинарные данные
-                    // update selector
-                    selector.wakeup();
-                }
-
-
             }
             // -------------------------------------------------------------------------
 
@@ -430,7 +436,7 @@ public class FubarServer implements Runnable {
      * Подготавливает данные для записи в сокет,
      * подписывается(устанавливает) на флаг возможности записи в сокет
      */
-    private void writeChannelText(SelectionKey key, ByteBuffer data) {
+    private void scheduleWrite(SelectionKey key, ReadableByteChannel data) {
 
         // Т.к. все асинхронное (несколько потоков)
         // То одному и тому же клиенту могут начать отправлять одновременно несколько сообщений -
@@ -448,13 +454,12 @@ public class FubarServer implements Runnable {
         // Можно, конечно валить все в сокет, (и больше ~3 метров в неблокирующем режиме не залезет)
         // дальше данные начнут теряться уже в сетевой подсистеме ядра при переполнении буффера сокета
 
-        if (connection.getData() != null) {
+        if (connection.getReadChannel() != null) {
             System.out.println("Внимание - обнаружена попытка одновременной передачи, данные НЕ отправлены");
             return;
         }
 
-        data.rewind();
-        connection.setData(data);
+        connection.setReadChannel(data);
         setInterest(key, SelectionKey.OP_WRITE);
     }
 

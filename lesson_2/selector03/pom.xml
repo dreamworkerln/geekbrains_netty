@@ -5,11 +5,11 @@
   <modelVersion>4.0.0</modelVersion>
 
   <groupId>ru.geekbrains.netty</groupId>
-  <artifactId>selector02</artifactId>
+  <artifactId>selector03</artifactId>
   <packaging>pom</packaging>
   <version>1.0-SNAPSHOT</version>
 
-  <name>selector02</name>
+  <name>selector03</name>
   <url>http://www.example.com</url>
 
   <modules>
