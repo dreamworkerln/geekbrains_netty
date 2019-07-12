@@ -3,7 +3,8 @@ package ru.geekbrains.netty.selector02.server;
 import ru.geekbrains.netty.selector02.server.entities.ConnectionList;
 import ru.geekbrains.netty.selector02.server.entities.jobpool.BlockingJobPool;
 import ru.geekbrains.netty.selector02.server.serverActions.DirectoryReader;
-import ru.geekbrains.netty.selector02.server.utils.LibUtil;
+import static ru.geekbrains.netty.selector02.server.utils.Utils.isNullOrEmpty;
+import static ru.geekbrains.netty.selector02.server.utils.Utils.copyBuffer;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -11,6 +12,8 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.*;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Iterator;
@@ -53,7 +56,9 @@ public class FubarServer implements Runnable {
     FubarServer() throws IOException {
 
         // Будут проблемы с путями
-        dataRoot = System.getProperty("user.dir") + "/server/data";  //(? File.separator)
+        dataRoot = System.getProperty("user.dir") + "/server/data/";  //(? File.separator)
+
+        Files.createDirectories(Paths.get(dataRoot));
 
         serverSocketChannel = ServerSocketChannel.open();
         serverSocketChannel.socket().bind(new InetSocketAddress("127.0.0.1", PORT_NUMBER));
@@ -107,17 +112,29 @@ public class FubarServer implements Runnable {
                     }
 
 
+
+
+
                     if (key.isReadable()) {
 
                         // Чтобы не бегать бесконечно в цикле select
-                        // Пока потоки из пула читают из сокетов
-                        // Когда они дочитают они сами поднимут обратно флаг OP_READ для key
+                        // Пока потоки из пула читают из сокетов.
                         removeInterest(key, SelectionKey.OP_READ);
 
-                        // Читаем в отдельном потоке
+                        // Читаем текстовую команду в отдельном потоке
+                        // Затем назначаем ее на выполнение
+                        // (выполняться будет потом в другом потоке)
                         SelectionKey finalKey = key;
                         jobPool.add(() -> {
-                            handleRead(finalKey);
+
+                            String command = readText(finalKey);
+                            processCommand(finalKey, command);
+
+                            // Возвращаем подписку на флаг чтения новых данных из сокета
+                            setInterest(finalKey, SelectionKey.OP_READ);
+                            // Будим селектор
+                            selector.wakeup();
+
                             return null;
                         });
                     }
@@ -127,7 +144,6 @@ public class FubarServer implements Runnable {
                     // Интерес на запись выставляется отдельно
                     // вручную при желании что-либо передать
                     // либо внутри handleWrite(...) если затопился сокет и отправка не удалась
-
                     if (key.isWritable()) {
 
                         removeInterest(key, SelectionKey.OP_WRITE);
@@ -191,23 +207,20 @@ public class FubarServer implements Runnable {
     }
 
 
+
+
     /**
-     * Читаем из сокета данные, сколько их там накопилось (в буфере чтения сокета).
-     * Т.е. можно прочитать только часть переданного сообщения,
-     * (т.к. заранее длину не передаем)
-     * этот метод используется для чтения коротких текстовых комманд
-     * То что прочитали записываем в ByteArrayOutputStream.
-     * (Файлы сюда не писать!)
-     * @param key
+     * Читаем из сокета данные, сколько их там накопилось
+     * (в буффере сокета) к текущему времени
+     * Используется для чтения текстовых комманд небольшой длины
      */
-    private void handleRead(SelectionKey key)  {
+    private String readText(SelectionKey key)  {
+
+        String result = null;
 
         try {
 
-            System.out.println("handleRead");
-
             SocketChannel client = (SocketChannel) key.channel();
-            //StringBuilder sb = new StringBuilder();
             int id = (int)key.attachment();
 
             ByteBuffer buffer = connectionList.get(id).getReadBuffer();
@@ -220,60 +233,131 @@ public class FubarServer implements Runnable {
             ByteArrayOutputStream bufferStream = connectionList.get(id).getBufferStream();
 
 
+            // Читаем данные, доступные в буфере сокета и забиваем на оставшиеся
+            // (по идее их не должно быть)
+            // Соответственно на другом конце не надо много передавать
             while ((read = client.read(buffer)) > 0) {
-                buffer.flip();
-                // тут походу двойная буфферизация
-                //ToDo: понять, куда нормально можно писать из ByteBuffer кроме как в файл, чтобы не плодить array[]
-                byte[] bytes = new byte[buffer.limit()];
-                buffer.get(bytes);
-                bufferStream.write(bytes);
+                bufferStream.write(buffer.array(), 0, buffer.position());
                 buffer.clear();
             }
 
-            String msg;
-            String res;
-
-
             // Remote endpoint close connection
+            // Если не дочиталось считаем все данные, накопленные в
+            // bufferStream бракованными
             if (read < 0) {
-                msg = key.attachment() + " покинул чат\n";
-                client.close();
-                connectionList.remove(id);
+                System.out.println(key.attachment() + " покинул чат");
+                connectionList.remove(id); // will close channel
             }
-            // Remote endpoint transmit some data:
+            // Remote endpoint transmit some data
+            // Что-то прочиталось от клиента
             else {
 
-                // Что-то прочиталось от клиента
                 // refresh client TTL
                 connectionList.update(id);
 
-                msg = new String(bufferStream.toByteArray()).trim();
-                bufferStream.reset();
-
-                // Ответ клиенту (пока везде текст)
-                res = parseCommand(key, msg);
-
-                // Отвечаем обратно клиенту текстом
-                ByteBuffer writeBuffer = ByteBuffer.wrap(res.getBytes());
-                writeChannel(key, writeBuffer);
-
-
-                // Возвращаем подписку на флаг чтения новых данных из сокета
-                // (Была удалена основным потоком сервера,
-                // чтобы не бегать бесконечно в цикле селектора,
-                // пока threads из пула не вычитали данные из сокета
-                // => и тем самым не опустили флаг о возможности чтения из сокета)
-                setInterest(key, SelectionKey.OP_READ);
+                result = new String(bufferStream.toByteArray(), StandardCharsets.UTF_8).trim();
+                System.out.println("IN: " + result);
             }
 
-            System.out.println("IN: " + msg);
-
-            // Update selector
-            selector.wakeup();
+            bufferStream.reset();
 
         } catch (Exception e) {
             e.printStackTrace();
         }
+
+        return result;
+    }
+
+
+    /**
+     * User commands parser and procesor
+     */
+
+
+    private void processCommand(SelectionKey key, String command) {
+
+        String result = null;
+
+        // Bad input
+        if (isNullOrEmpty(command)) {
+            return;
+        }
+
+        String[] parts = command.split(" ");
+
+        switch (parts[0]) {
+
+            case "list":
+                Function<String,String> dirNfo = new DirectoryReader();
+                result = dirNfo.apply(dataRoot);
+                break;
+
+            case "get":
+
+                if (parts.length < 2 ||
+                    isNullOrEmpty(parts[1])) {
+                    result = "invalid command args";
+                }
+                else {
+                    String filePathString =  ;
+
+                    Path file = Paths.get(dataRoot + parts[1]);
+                    Files.exists(file);
+
+                }
+                
+
+                break;
+
+
+
+
+            default:
+                result = "unknown command";
+                break;
+        }
+
+
+
+
+
+
+
+
+
+        // Ответ клиенту (пока везде текст)
+        res = parseCommand(key, msg);
+
+        // Отвечаем обратно клиенту текстом
+        ByteBuffer writeBuffer = ByteBuffer.wrap(res.getBytes());
+        writeChannel(key, writeBuffer);
+    }
+
+
+
+    // command router
+    private String parseCommand(SelectionKey key, String msg) {
+
+        String result = "";
+
+        // sleeping
+        if (msg.equals("sleep"))  {
+            try {
+                Thread.sleep(100000000);
+            } catch (Exception ignore) {}
+
+        }
+        // DIR LIST
+        else if (msg.equalsIgnoreCase("list")) {
+
+            Function<String,String> dirNfo = new DirectoryReader();
+            result = dirNfo.apply(dataRoot);
+        }
+        // UNKNOWN COMMAND
+        else {
+            result = key.attachment() + ": " + msg + "\n";
+        }
+        return result;
     }
 
 
@@ -306,13 +390,12 @@ public class FubarServer implements Runnable {
             do {
 
                 buffer.rewind();
-                LibUtil.copyBuffer(data, buffer);
+                copyBuffer(data, buffer);
                 buffer.flip();
 
             }
             while ((wrote = client.write(buffer)) > 0 &
                    data.remaining() > 0);
-
             // -------------------------------------------------
             // Если хоть что-то передалось
             if (remainingBefore > data.remaining()) {
@@ -377,7 +460,8 @@ public class FubarServer implements Runnable {
 
 
     /**
-     * Write data to client using handleWrite(..)
+     * Подгатавливает данные для записи в сокет
+     * Подписывается на флаг возможности записи в сокет
      */
     private void writeChannel(SelectionKey key, ByteBuffer data) {
 
@@ -425,40 +509,6 @@ public class FubarServer implements Runnable {
             key.interestOps(current & ~interest);
         }
     }
-
-
-
-
-
-
-    // command router
-    private String parseCommand(SelectionKey key, String msg) {
-
-        String result = "";
-
-        // sleeping
-        if (msg.equals("sleep"))  {
-            try {
-                Thread.sleep(100000000);
-            } catch (Exception ignore) {}
-
-        }
-        // DIR LIST
-        else if (msg.equalsIgnoreCase("list")) {
-
-            Function<String,String> dirNfo = new DirectoryReader();
-            result = dirNfo.apply(dataRoot);
-        }
-        // UNKNOWN COMMAND
-        else {
-            result = key.attachment() + ": " + msg + "\n";
-        }
-        return result;
-    }
-
-
-
-
 
 
 
