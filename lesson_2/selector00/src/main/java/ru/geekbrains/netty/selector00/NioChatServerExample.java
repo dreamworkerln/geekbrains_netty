@@ -31,7 +31,7 @@ public class NioChatServerExample implements Runnable {
     NioChatServerExample() throws IOException {
 
         serverSocketChannel = ServerSocketChannel.open();
-        serverSocketChannel.socket().bind(new InetSocketAddress("127.0.0.1", 8189));
+        serverSocketChannel.socket().bind(new InetSocketAddress("127.0.0.1", 8000));
         serverSocketChannel.configureBlocking(false);
 
         selector = Selector.open();
@@ -41,7 +41,7 @@ public class NioChatServerExample implements Runnable {
     @Override
     public void run() {
         try {
-            System.out.println("Сервер запущен (Порт: 8189)");
+            System.out.println("Сервер запущен (Порт: 8000)");
             Iterator<SelectionKey> iter;
             SelectionKey key;
             // while true

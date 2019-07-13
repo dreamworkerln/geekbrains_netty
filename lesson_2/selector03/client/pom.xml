@@ -9,9 +9,14 @@
         <groupId>ru.geekbrains.netty</groupId>
         <artifactId>selector03</artifactId>        
         <version>1.0-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
     </parent>    
 
     <artifactId>client</artifactId>
+
+    <modules>
+        <module>../common</module>
+    </modules>
 
     <dependencies>
 <!--        <dependency>

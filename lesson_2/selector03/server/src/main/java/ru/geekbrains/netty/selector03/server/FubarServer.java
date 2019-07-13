@@ -1,10 +1,12 @@
 package ru.geekbrains.netty.selector03.server;
 
 import org.apache.commons.compress.utils.SeekableInMemoryByteChannel;
-import ru.geekbrains.netty.selector03.server.entities.Connection;
+import ru.geekbrains.netty.selector03.common.entities.Connection;
 import ru.geekbrains.netty.selector03.server.entities.ConnectionList;
 import ru.geekbrains.netty.selector03.server.entities.jobpool.BlockingJobPool;
 import ru.geekbrains.netty.selector03.server.serverActions.DirectoryReader;
+
+import static ru.geekbrains.netty.selector03.common.entities.Utils.channelToString;
 import static ru.geekbrains.netty.selector03.server.utils.Utils.isNullOrEmpty;
 
 import java.io.*;
@@ -33,9 +35,7 @@ public class FubarServer implements Runnable {
 
     private ServerSocketChannel serverSocketChannel;
     private Selector selector;
-    //private ByteBuffer buf = ByteBuffer.allocate(256);
-    //private int acceptedClientIndex = 1;
-    private final String welcomeString = "Fubar Transfer Protocol server приветствует вас.\n";
+    private final String welcomeString = "Fubar Transfer Protocol server приветствует вас.";
 
     // Non-negative AtomicInteger incrementator
     private static IntUnaryOperator AtomicNonNegativeIntIncrementator = (i) -> i == Integer.MAX_VALUE ? 0 : i + 1;
@@ -47,15 +47,13 @@ public class FubarServer implements Runnable {
     private BlockingJobPool<Void> jobPool =  new BlockingJobPool<>(4, this::onDone);
 
     private static final int PORT_NUMBER = 8000;
-
-
     private String dataRoot;
+
 
     FubarServer() throws IOException {
 
         // Будут проблемы с путями
         dataRoot = System.getProperty("user.dir") + "/server/data/";  //(? File.separator)
-
         Files.createDirectories(Paths.get(dataRoot));
 
         serverSocketChannel = ServerSocketChannel.open();
@@ -108,7 +106,7 @@ public class FubarServer implements Runnable {
 
                         // Снипмаем подписку о получении новых данных в сокете
                         // Чтобы не бегать бесконечно в цикле select
-                        // Пока поток из пула читает данные из сокета
+                        // пока поток из пула читает данные из сокета
                         removeInterest(key, SelectionKey.OP_READ);
 
                         // Читаем данные в отдельном потоке
@@ -236,21 +234,32 @@ public class FubarServer implements Runnable {
             int read;
 
             // read >  0  - readied some data
-            // read =  0  - no data available
-            // read = -1  - connection closed / EOF
+            // read =  0  - no data available (end of stream)
+            // read = -1  - closed connection
 
             while ((read = client.read(buffer)) > 0) {
-                
+
                 buffer.flip();
 
                 // устанавливаем флаг что что-то смогли прочитать из сокета
                 someDataHasReadied = true;
 
                 // Parse header if didn't do it before
-                // Узнаем тип сообщения и его размер
+                // Узнаем тип сообщения и его размер, и выделяем канал, если это команда
                 if (!connection.isHeaderHasReaded()) {
-                    parseHeader(connection);
+                    connection.parseHeader();
+
+                    // Определяемся, куда сохранять данные
+                    // Если это текстовая команда, выделим под нее канал
+                    if(connection.getMessageType() == Connection.MessageType.TEXT) {
+
+                        // после разборки команды этот канал будет закрыт
+                        connection.setReceiveChannel(new SeekableInMemoryByteChannel());
+                    }
+                    // Если же это файл, то нас уже заранее командой попросили принять файл
+                    // и receiveChannel уже присвоен к RandomAccessFile
                 }
+
 
                 // уменьшаем количество оставшихся байт сообщения для чтения
                 connection.setRemainingBytesToRead(connection.getRemainingBytesToRead() - read);
@@ -275,10 +284,10 @@ public class FubarServer implements Runnable {
             }
 
             // Приняли все байты сообщения
-            if(connection.getRemainingBytesToRead() == 0)  {
+            // там nc добавляет в конец сообщения '#10', поэтому на слякий случай проверяем <=0
+            if(connection.getRemainingBytesToRead() <= 0)  {
 
                 // возвращаем обратно возможность разбирать заголовок нового сообщения
-                // восстанавливаем новый цикл приема сообщений
                 connection.setHeaderHasReaded(false);
             }
 
@@ -297,47 +306,13 @@ public class FubarServer implements Runnable {
 
 
 
-    private void parseHeader(Connection connection) {
-
-
-        ByteBuffer buffer = connection.getReadBuffer();
-        //int bufferLimit = buffer.limit();
-        buffer.rewind();
-
-        // get payload length
-        connection.setRemainingBytesToRead(buffer.getLong());
-
-        // увеличим количество байт для чтения на размер заголовка (8+1)
-        // т.к. в цикле readSocket(..)
-        // В количество прочитанных байт из сокета 'read' войдет как длина заголовока,
-        // так и число прочтенных байт самого сообщения
-        connection.setRemainingBytesToRead(connection.getRemainingBytesToRead() + 8 + 1);
-
-        // get message type
-        connection.setMessageType(Connection.MessageType.parse(buffer.get()));
-//
-//        // Устанавливаем подходящий канал
-//        switch (connection.getMessageType()) {
-//            case TEXT:
-//
-//                break;
-//            case BINARY:
-//
-//                break;
-//        }
-
-
-        connection.setHeaderHasReaded(true);
-    }
-
-
 
     private void writeSocket(SelectionKey key)  {
 
         int id = -1;
 
         try {
-            
+
             System.out.println("writeSocket");
 
             SocketChannel client = (SocketChannel)key.channel();
@@ -363,7 +338,7 @@ public class FubarServer implements Runnable {
 
                 // Add header if absent
                 if (!connection.isHeaderHasWrited()) {
-                    writeHeader(connection);
+                    connection.writeHeader();
                 }
 
                 dataReaded = data.read(buffer);
@@ -389,20 +364,11 @@ public class FubarServer implements Runnable {
             // текущее сообщение
 
 
-            // -------------------------------------------------------------------------
-            // Remote endpoint close connection
-//            if (wrote < 0) {
-//                System.out.println(key.attachment() + " отключился");
-//                connectionList.remove(id); // will close socket channel
-//            }
-            // -------------------------------------------------------------------------
-
-
             // Не смогли передать все данные
             // Флудим сокет данными - он не успевает принимать на удаленном конце
             // регистрируемся на флаг что удаленный сокет может принимать сообщения
             // чтобы возобновить передачу как сокет будет готов передавать
-            else if (data.position() < data.size()) {
+            if (data.position() < data.size()) {
 
                 // Сохранить непереданный кусок данных для следущего цикла передачи
                 // отмотаем transmitChannel назад на размер буффера
@@ -425,7 +391,7 @@ public class FubarServer implements Runnable {
 
                 // Закрываем канал (откуда писали в сокет)
                 data.close();
-                
+
                 // обнуляем ссылку на transmitChannel
                 // (Защита от записи в сокет нового сообщения,
                 // если он еще не закончил передачу текущих данных)
@@ -450,33 +416,6 @@ public class FubarServer implements Runnable {
             e.printStackTrace();
         }
     }
-
-
-    /**
-     * Write header to connection.writeBuffer
-     */
-    private void writeHeader(Connection connection) {
-
-        try {
-
-            ByteBuffer buffer = connection.getWriteBuffer();
-            assert buffer.position() == 0;
-
-            // write message size
-            buffer.putLong(connection.getTransmitChannel().size());
-
-            // write message type
-            buffer.put((byte)connection.getMessageType().getValue());
-
-            connection.setHeaderHasWrited(true);
-
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-    }
-
-
-
 
     // -------------------------------------------------------------------------------
 
@@ -546,21 +485,37 @@ public class FubarServer implements Runnable {
     }
 
 
+
+
+
+
     /**
      * Whether receive text command or binary data
      */
     private void processInput(SelectionKey key) {
 
-        int id = (int)key.attachment();
-        Connection connection = connectionList.get(id);
+        try {
+            int id = (int)key.attachment();
+            Connection connection = connectionList.get(id);
 
-        if (connection.getMessageType() == Connection.MessageType.BINARY) {
+            if (connection.getMessageType() == Connection.MessageType.TEXT) {
 
-         }
+                String command = channelToString(connection.getReceiveChannel());
+
+                processCommand(key, command);
+            }
+            else {
+                // там в прошлом через команду уже настроен файл для приема
+            }
+
+            // Закрываем канал с принятыми и обработанными от сервера данными
+            connection.getReceiveChannel().close();
 
 
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
 
-        processCommand(key, "123");
     }
 
 
@@ -571,7 +526,9 @@ public class FubarServer implements Runnable {
      */
     private void processCommand(SelectionKey key, String command) {
 
-        String result = null;
+        SeekableByteChannel data = null;
+        String textResponse = null;
+
         int id = (int)key.attachment();
         Connection connection = connectionList.get(id);
 
@@ -586,7 +543,7 @@ public class FubarServer implements Runnable {
 
             case "list":
                 Function<String,String> dirNfo = new DirectoryReader();
-                result = dirNfo.apply(dataRoot);
+                textResponse = dirNfo.apply(dataRoot);
 
                 break;// ---------------------------------------------------------
 
@@ -597,7 +554,7 @@ public class FubarServer implements Runnable {
                 if (parts.length < 2 ||
                     isNullOrEmpty(parts[1])) {
 
-                    result = "invalid command args";
+                    textResponse = "invalid command args";
                     break;
                 }
 
@@ -606,7 +563,7 @@ public class FubarServer implements Runnable {
 
                 // file not exists
                 if (!Files.exists(filePath)) {
-                    result = "file not exists";
+                    textResponse = "file not exists";
                     break;
                 }
 
@@ -616,12 +573,13 @@ public class FubarServer implements Runnable {
 
                     // if file successfully opened to read
                     // store file channel
-                    connection.setTransmitChannel(file.getChannel());
+                    //connection.setTransmitChannel(file.getChannel());
 
-                    //result = Connection.MessageType.BINARY.toString();
+                    // А тут будем отвечать клиенту файлом
+                    data = file.getChannel();
                 }
                 catch (Exception e) {
-                    result = "I/O error";
+                    textResponse = "I/O error";
                     e.printStackTrace();
                 }
 
@@ -634,7 +592,7 @@ public class FubarServer implements Runnable {
                 if (parts.length < 2 ||
                     isNullOrEmpty(parts[1])) {
 
-                    result = "invalid command args";
+                    textResponse = "invalid command args";
                     break;
                 }
 
@@ -647,29 +605,31 @@ public class FubarServer implements Runnable {
                     // if file successfully opened to write
                     // store file channel
                     connection.setReceiveChannel(file.getChannel());
+                    textResponse = "ok";
                 }
                 catch (Exception e) {
-                    result = "I/O error";
+                    textResponse = "I/O error";
                     e.printStackTrace();
                 }
 
                 break;// ---------------------------------------------------------
 
             default:
-                result = "unknown command";
-                 break;// ---------------------------------------------------------
+                textResponse = "unknown command";
+                break;// ---------------------------------------------------------
         }
 
 
-        // Заланируем отправку клиенту результата выполнения команды
-        if (!isNullOrEmpty(result)) {
-            result +="\n";
+        // Заланируем отправку клиенту результата выполнения команды - текст
+        if (!isNullOrEmpty(textResponse)) {
 
-            SeekableByteChannel data = new SeekableInMemoryByteChannel(result.getBytes());
-
-            // schedule sending greeting
-            scheduleWrite(key, data);
+            data = new SeekableInMemoryByteChannel(textResponse.getBytes());
         }
+
+        assert data!=null;
+
+        // schedule sending response to command (text)
+        scheduleWrite(key, data);
     }
 
 
@@ -705,7 +665,7 @@ public class FubarServer implements Runnable {
     public static void main(String[] args) throws IOException {
 
         Thread t = new Thread(new FubarServer());
-        t.setDaemon(false);
+        //t.setDaemon(false);
         t.start();
     }
 

@@ -1,5 +1,8 @@
 package ru.geekbrains.netty.selector03.client;
 
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+
 /**
  * Hello world!
  *
@@ -16,8 +19,17 @@ public class App
 
     App() {
 
-        System.out.println("Use nc or telnet");
 
     }
+
+
+
+
+
+
+
+
+
+
 
 }

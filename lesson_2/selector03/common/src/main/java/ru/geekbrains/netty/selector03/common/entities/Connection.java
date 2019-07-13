@@ -1,4 +1,4 @@
-package ru.geekbrains.netty.selector03.server.entities;
+package ru.geekbrains.netty.selector03.common.entities;
 
 import org.apache.commons.compress.utils.SeekableInMemoryByteChannel;
 
@@ -9,7 +9,7 @@ import java.time.Instant;
 
 public class Connection {
 
-    private static final int BUFFER_SIZE = 10; // read and write buffer size
+    private static final int BUFFER_SIZE = 15; // read and write buffer size
 
 
     public enum MessageType {
@@ -45,7 +45,7 @@ public class Connection {
 
 
     private SelectionKey key;
-    private SocketChannel channel;
+    private SocketChannel channel;  // сокет
     private ByteBuffer readBuffer;  // промежуточный буффер на чтение
     private ByteBuffer writeBuffer; // промежуточный буффер на запись
     private Instant time;
@@ -72,8 +72,15 @@ public class Connection {
         this.channel = (SocketChannel)key.channel();
         this.readBuffer = ByteBuffer.allocate(BUFFER_SIZE);
         this.writeBuffer = ByteBuffer.allocate(BUFFER_SIZE);
-        this.receiveChannel = new SeekableInMemoryByteChannel(); // preinit receive
+        this.messageType = MessageType.TEXT;
         this.time = time;
+    }
+
+    public Connection(SocketChannel channel) {
+
+        this.channel = channel;
+        this.readBuffer = ByteBuffer.allocate(BUFFER_SIZE);
+        this.writeBuffer = ByteBuffer.allocate(BUFFER_SIZE);
         this.messageType = MessageType.TEXT;
     }
 
@@ -150,8 +157,10 @@ public class Connection {
         this.messageType = messageType;
     }
 
-    public void close() {
 
+    // -----------------------------------------------------------------------------------
+
+    public void close() {
 
         // close socket
         if (channel != null &&
@@ -161,14 +170,6 @@ public class Connection {
                 channel.close();
             } catch (IOException ignored) {}
         }
-
-//        // close file
-//        if (file != null) {
-//            try {
-//                file.close();
-//            } catch (IOException ignored) {}
-//        }
-
 
         // close transmitChannel
         if (transmitChannel != null) {
@@ -186,26 +187,63 @@ public class Connection {
     }
 
 
-    /*
-    public ByteArrayOutputStream getBufferStream() {
-        return bufferStream;
+
+    /**
+     * Write header to connection.writeBuffer
+     */
+    public void writeHeader() {
+
+        try {
+
+            ByteBuffer buffer = getWriteBuffer();
+            assert buffer.position() == 0;
+
+            // write message size
+            buffer.putLong(getTransmitChannel().size());
+
+            // write message type
+            buffer.put((byte)getMessageType().getValue());
+
+            setHeaderHasWrited(true);
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
     }
 
-    public MessageType getCurrentMode() {return currentMode;}
 
-    public void setCurrentMode(MessageType currentMode) {this.currentMode = currentMode;}
 
-    public MessageType getNextMode() {return nextMode;}
+    /**
+     * Read header from connection.readBuffer
+     */
+    public void parseHeader() {
 
-    public void setNextMode(MessageType nextMode) {this.nextMode = nextMode;}
+        try {
 
-    public ByteBuffer getData() {
-        return data;
+            ByteBuffer buffer = getReadBuffer();
+
+            buffer.rewind();
+
+            // get payload length
+            setRemainingBytesToRead(buffer.getLong());
+
+            // увеличим количество байт для чтения на размер заголовка (8+1)
+            // т.к. в цикле readSocket(..)
+            // В количество прочитанных байт из сокета 'read' войдет как длина заголовока,
+            // так и число прочтенных байт самого сообщения
+            setRemainingBytesToRead(getRemainingBytesToRead() + 8 + 1);
+
+            // get message type
+            setMessageType(Connection.MessageType.parse(buffer.get()));
+
+            setHeaderHasReaded(true);
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
     }
 
-    public void setData(ByteBuffer data) {
-        this.data = data;
-    }
-    */
+
+
 
 }

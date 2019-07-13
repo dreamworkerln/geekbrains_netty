@@ -1,14 +1,12 @@
 package ru.geekbrains.netty.selector03.server.entities;
 
-import java.io.IOException;
-import java.io.RandomAccessFile;
 import java.nio.channels.SelectionKey;
-import java.nio.channels.SocketChannel;
 import java.time.Instant;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.NavigableMap;
 import java.util.concurrent.ConcurrentSkipListMap;
+import ru.geekbrains.netty.selector03.common.entities.Connection;
 
 
 // ByteBuffer cache for clients
