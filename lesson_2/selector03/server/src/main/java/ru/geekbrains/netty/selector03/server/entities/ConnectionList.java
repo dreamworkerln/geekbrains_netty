@@ -14,7 +14,6 @@ import java.util.concurrent.ConcurrentSkipListMap;
 // ByteBuffer cache for clients
 public class ConnectionList implements Iterable<Map.Entry<Integer, Connection>>{
 
-    static final int BUFFER_SIZE = 1024; // read and write buffer size
     private static final int ROTTEN_INTERVAL = 100000000; // sec
 
 
@@ -61,26 +60,9 @@ public class ConnectionList implements Iterable<Map.Entry<Integer, Connection>>{
         if (connection != null) {
 
             System.out.println("Removing connection #" + id);
-
-            // close socket
-            SocketChannel channel = connection.getChannel();
-            if (channel != null &&
-                channel.isOpen()) {
-
-                try {
-                    channel.close();
-                } catch (IOException ignored) {}
-            }
-
-            // close file
-            RandomAccessFile file = connection.getFile();
-            if (file != null) {
-                try {
-                    file.close();
-                } catch (IOException ignored) {}
-            }
-
             connTimeList.remove(connection.getTime());
+
+            connection.close();
         }
         connList.remove(id);
     }
@@ -112,6 +94,8 @@ public class ConnectionList implements Iterable<Map.Entry<Integer, Connection>>{
 
         }
     }
+
+
 
 
 

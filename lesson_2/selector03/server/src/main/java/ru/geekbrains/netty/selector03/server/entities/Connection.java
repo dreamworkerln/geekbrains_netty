@@ -1,20 +1,46 @@
 package ru.geekbrains.netty.selector03.server.entities;
 
-import java.io.ByteArrayOutputStream;
-import java.io.RandomAccessFile;
+import org.apache.commons.compress.utils.SeekableInMemoryByteChannel;
+
+import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.nio.channels.ReadableByteChannel;
-import java.nio.channels.SelectionKey;
-import java.nio.channels.SocketChannel;
-import java.nio.channels.WritableByteChannel;
+import java.nio.channels.*;
 import java.time.Instant;
 
 public class Connection {
 
+    private static final int BUFFER_SIZE = 10; // read and write buffer size
 
-    public enum Mode {
-        TEXT,
-        BINARY
+
+    public enum MessageType {
+        TEXT(0),
+        BINARY(1);
+
+        private int value;
+
+
+        MessageType(int value) {
+            this.value = value;
+        }
+
+        public int getValue() {
+            return value;
+        }
+
+        public static MessageType parse(int value) {
+
+            MessageType result = null;
+
+
+            if (value == 0) {
+                result = Connection.MessageType.TEXT;
+            }
+            else if (value == 1) {
+                result = Connection.MessageType.BINARY;
+            }
+
+            return result;
+        }
     }
 
 
@@ -23,20 +49,20 @@ public class Connection {
     private ByteBuffer readBuffer;  // промежуточный буффер на чтение
     private ByteBuffer writeBuffer; // промежуточный буффер на запись
     private Instant time;
-    private ReadableByteChannel readChannel;  // источник данных от клиента
-    private WritableByteChannel writeChannel; // приемник данных которые передаем клиенту
+    private SeekableByteChannel transmitChannel;  // канал на передачу данных клиенту
+    private SeekableByteChannel receiveChannel;   // канал на прием данных от клиента
 
-    private boolean headerReceived;
+    private boolean headerHasReaded; // заголовок принимаемого сообщения был прочитан
+    private boolean headerHasWrited; // в отправляемое сообщение был записан заголовок
 
     //private ByteBuffer data;        // emulating data(file) needed to be transferred to client
 
-    private RandomAccessFile file; // работает с readBuffer/writeBuffer (замещая writeChannel/readChannel)
+    //private RandomAccessFile file; // работает с readBuffer/writeBuffer (замещая receiveChannel/transmitChannel)
+    private long remainingBytesToRead;
     //private ByteArrayOutputStream bufferStream; // работает с readBuffer при приеме текстового сообщения
 
     // server state (text/binary)
-    //private Mode currentMode;  // current mode
-    //private Mode nextMode;     // desirable mode on next select loop iteration
-
+    private MessageType messageType;    // current messageType
 
 
 
@@ -44,14 +70,11 @@ public class Connection {
 
         this.key = key;
         this.channel = (SocketChannel)key.channel();
-        this.readBuffer = ByteBuffer.allocate(ConnectionList.BUFFER_SIZE);
-        this.writeBuffer = ByteBuffer.allocate(ConnectionList.BUFFER_SIZE);
-        //this.bufferStream = new ByteArrayOutputStream(ConnectionList.BUFFER_SIZE);
+        this.readBuffer = ByteBuffer.allocate(BUFFER_SIZE);
+        this.writeBuffer = ByteBuffer.allocate(BUFFER_SIZE);
+        this.receiveChannel = new SeekableInMemoryByteChannel(); // preinit receive
         this.time = time;
-        //this.data = null;
-
-        //this.currentMode = Mode.TEXT;
-        //this.nextMode = null;
+        this.messageType = MessageType.TEXT;
     }
 
     public ByteBuffer getReadBuffer() {
@@ -74,46 +97,107 @@ public class Connection {
 
     public void setTime(Instant time) {this.time = time;}
 
-    public RandomAccessFile getFile() {return file;}
+/*    public RandomAccessFile getFile() {return file;}
 
-    public void setFile(RandomAccessFile file) {this.file = file;}
+    public void setFile(RandomAccessFile file) {this.file = file;}*/
 
-    public ReadableByteChannel getReadChannel() {
-        return readChannel;
+    public SeekableByteChannel getTransmitChannel() {
+        return transmitChannel;
     }
 
-    public void setReadChannel(ReadableByteChannel readChannel) {
-        this.readChannel = readChannel;
+    public void setTransmitChannel(SeekableByteChannel transmitChannel) {
+        this.transmitChannel = transmitChannel;
     }
 
-    public WritableByteChannel getWriteChannel() {
-        return writeChannel;
+    public SeekableByteChannel getReceiveChannel() {
+        return receiveChannel;
     }
 
-    public void setWriteChannel(WritableByteChannel writeChannel) {
-        this.writeChannel = writeChannel;
+    public void setReceiveChannel(SeekableByteChannel receiveChannel) {
+        this.receiveChannel = receiveChannel;
     }
 
-    public boolean isHeaderReceived() {
-        return headerReceived;
+    public boolean isHeaderHasReaded() {
+        return headerHasReaded;
     }
 
-    public void setHeaderReceived(boolean headerReceived) {
-        this.headerReceived = headerReceived;
+    public void setHeaderHasReaded(boolean headerHasReaded) {
+        this.headerHasReaded = headerHasReaded;
     }
+
+
+    public boolean isHeaderHasWrited() {
+        return headerHasWrited;
+    }
+
+    public void setHeaderHasWrited(boolean headerHasWrited) {
+        this.headerHasWrited = headerHasWrited;
+    }
+
+    public long getRemainingBytesToRead() {
+        return remainingBytesToRead;
+    }
+
+    public void setRemainingBytesToRead(long remainingBytesToRead) {
+        this.remainingBytesToRead = remainingBytesToRead;
+    }
+
+    public MessageType getMessageType() {
+        return messageType;
+    }
+
+    public void setMessageType(MessageType messageType) {
+        this.messageType = messageType;
+    }
+
+    public void close() {
+
+
+        // close socket
+        if (channel != null &&
+            channel.isOpen()) {
+
+            try {
+                channel.close();
+            } catch (IOException ignored) {}
+        }
+
+//        // close file
+//        if (file != null) {
+//            try {
+//                file.close();
+//            } catch (IOException ignored) {}
+//        }
+
+
+        // close transmitChannel
+        if (transmitChannel != null) {
+            try {
+                transmitChannel.close();
+            } catch (IOException ignored) {}
+        }
+
+        // close receiveChannel
+        if (receiveChannel != null) {
+            try {
+                receiveChannel.close();
+            } catch (IOException ignored) {}
+        }
+    }
+
 
     /*
     public ByteArrayOutputStream getBufferStream() {
         return bufferStream;
     }
 
-    public Mode getCurrentMode() {return currentMode;}
+    public MessageType getCurrentMode() {return currentMode;}
 
-    public void setCurrentMode(Mode currentMode) {this.currentMode = currentMode;}
+    public void setCurrentMode(MessageType currentMode) {this.currentMode = currentMode;}
 
-    public Mode getNextMode() {return nextMode;}
+    public MessageType getNextMode() {return nextMode;}
 
-    public void setNextMode(Mode nextMode) {this.nextMode = nextMode;}
+    public void setNextMode(MessageType nextMode) {this.nextMode = nextMode;}
 
     public ByteBuffer getData() {
         return data;

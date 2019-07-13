@@ -1,17 +1,16 @@
 package ru.geekbrains.netty.selector03.server;
 
+import org.apache.commons.compress.utils.SeekableInMemoryByteChannel;
 import ru.geekbrains.netty.selector03.server.entities.Connection;
 import ru.geekbrains.netty.selector03.server.entities.ConnectionList;
 import ru.geekbrains.netty.selector03.server.entities.jobpool.BlockingJobPool;
 import ru.geekbrains.netty.selector03.server.serverActions.DirectoryReader;
 import static ru.geekbrains.netty.selector03.server.utils.Utils.isNullOrEmpty;
-import static ru.geekbrains.netty.selector03.server.utils.Utils.copyBuffer;
 
 import java.io.*;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.*;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -71,11 +70,6 @@ public class FubarServer implements Runnable {
 
     }
 
-
-    public void onDone(Void v) {
-        System.out.println("Done");
-    }
-
     @Override
     public void run() {
 
@@ -125,12 +119,12 @@ public class FubarServer implements Runnable {
 
                             try {
 
-                                String command = readSocket(finalKey);
-                                processCommand(finalKey, command);
+                                readSocket(finalKey);
+                                processInput(finalKey);
 
                                 // Возвращаем подписку на флаг чтения новых данных из сокета
                                 setInterest(finalKey, SelectionKey.OP_READ);
-                                // Будим селектор
+                                // Будим селектор (могли подойти новые данные)
                                 selector.wakeup();
                             }
                             catch (Exception e) {
@@ -163,7 +157,6 @@ public class FubarServer implements Runnable {
                             }
                             return null;
                         });
-
                     }
                 }
             }
@@ -173,9 +166,7 @@ public class FubarServer implements Runnable {
     }
 
 
-
     private void acceptSocket(SelectionKey key) {
-
 
         try {
 
@@ -205,19 +196,7 @@ public class FubarServer implements Runnable {
 
             connectionList.add(clientKey);
 
-
-            //ByteBuffer welcomeBuf = ByteBuffer.wrap(welcomeString.getBytes());
-
-
-            PipedInputStream pipedInputStream = new PipedInputStream();
-            PipedOutputStream pipedOutputStream = new PipedOutputStream();
-            pipedInputStream.connect(pipedOutputStream);
-
-            pipedOutputStream.write(welcomeString.getBytes());
-            //ByteArrayOutputStream outStream = new ByteArrayOutputStream(welcomeString.length());
-            //outStream.write(welcomeString.getBytes());
-
-            ReadableByteChannel data = Channels.newChannel(pipedInputStream);
+            SeekableByteChannel data = new SeekableInMemoryByteChannel(welcomeString.getBytes());
 
             // schedule sending greeting
             scheduleWrite(clientKey, data);
@@ -236,169 +215,270 @@ public class FubarServer implements Runnable {
      * Читаем из сокета данные, сколько их там накопилось
      * Учитывая длину сообщения из заголовка
      */
-    private String readSocket(SelectionKey key)  {
+    private void readSocket(SelectionKey key)  {
 
-        String result = null;
+        int id = -1;
 
         try {
 
             SocketChannel client = (SocketChannel)key.channel();
-            int id = (int)key.attachment();
+            id = (int)key.attachment();
             Connection connection = connectionList.get(id);
 
-            WritableByteChannel data = connection.getWriteChannel();
+            SeekableByteChannel data = connection.getReceiveChannel();
             ByteBuffer buffer = connection.getReadBuffer();
 
             // подготавливаем буфер для чтения
-            buffer.reset();
+            buffer.clear();
+
+            boolean someDataHasReadied = false;
 
             int read;
 
             // read >  0  - readied some data
             // read =  0  - no data available
-            // read = -1  - connection closed
+            // read = -1  - connection closed / EOF
 
             while ((read = client.read(buffer)) > 0) {
+                
+                buffer.flip();
 
-                // Parse header
-                if (!connection.isHeaderReceived()) {
-                    parseHeader();
+                // устанавливаем флаг что что-то смогли прочитать из сокета
+                someDataHasReadied = true;
+
+                // Parse header if didn't do it before
+                // Узнаем тип сообщения и его размер
+                if (!connection.isHeaderHasReaded()) {
+                    parseHeader(connection);
                 }
+
+                // уменьшаем количество оставшихся байт сообщения для чтения
+                connection.setRemainingBytesToRead(connection.getRemainingBytesToRead() - read);
+
 
                 data.write(buffer);
                 buffer.clear();
             }
 
-            // Remote endpoint close connection
-            // Если не дочиталось считаем все данные, накопленные в
-            // bufferStream бракованными
-            if (read < 0) {
-                System.out.println(key.attachment() + " покинул чат");
-                connectionList.remove(id); // will close channel
-            }
-            // Remote endpoint transmit some data
-            // Что-то прочиталось от клиента
-            else {
-
+            // -------------------------------------------------
+            // Если хоть что-то передалось
+            if (someDataHasReadied) {
                 // refresh client TTL
                 connectionList.update(id);
+            }
+            // -------------------------------------------------
 
-                result = new String(bufferStream.toByteArray(), StandardCharsets.UTF_8).trim();
-                System.out.println("IN: " + result);
+            // Remote endpoint close connection
+            if (read < 0) {
+                System.out.println(key.attachment() + " отключился");
+                connectionList.remove(id); // will close socket channel
             }
 
-            bufferStream.reset();
+            // Приняли все байты сообщения
+            if(connection.getRemainingBytesToRead() == 0)  {
 
-        } catch (Exception e) {
+                // возвращаем обратно возможность разбирать заголовок нового сообщения
+                // восстанавливаем новый цикл приема сообщений
+                connection.setHeaderHasReaded(false);
+            }
+
+        }
+        // Remote endpoint close connection
+        // maybe not happened: handled in "if (read < 0)"
+        catch(ClosedChannelException e) {
+            System.out.println(key.attachment() + " отключился");
+            connectionList.remove(id); // will close socket channel
+        }
+        catch (Exception e) {
             e.printStackTrace();
         }
-
-        return result;
     }
 
-    private void parseHeader() {
 
-        
 
+
+    private void parseHeader(Connection connection) {
+
+
+        ByteBuffer buffer = connection.getReadBuffer();
+        //int bufferLimit = buffer.limit();
+        buffer.rewind();
+
+        // get payload length
+        connection.setRemainingBytesToRead(buffer.getLong());
+
+        // увеличим количество байт для чтения на размер заголовка (8+1)
+        // т.к. в цикле readSocket(..)
+        // В количество прочитанных байт из сокета 'read' войдет как длина заголовока,
+        // так и число прочтенных байт самого сообщения
+        connection.setRemainingBytesToRead(connection.getRemainingBytesToRead() + 8 + 1);
+
+        // get message type
+        connection.setMessageType(Connection.MessageType.parse(buffer.get()));
+//
+//        // Устанавливаем подходящий канал
+//        switch (connection.getMessageType()) {
+//            case TEXT:
+//
+//                break;
+//            case BINARY:
+//
+//                break;
+//        }
+
+
+        connection.setHeaderHasReaded(true);
     }
 
 
 
     private void writeSocket(SelectionKey key)  {
 
-        try {
+        int id = -1;
 
+        try {
+            
             System.out.println("writeSocket");
 
             SocketChannel client = (SocketChannel)key.channel();
-            int id = (int)key.attachment();
+            id = (int)key.attachment();
             Connection connection = connectionList.get(id);
 
             ByteBuffer buffer = connection.getWriteBuffer();
-            ReadableByteChannel data = connection.getReadChannel();
+            SeekableByteChannel data = connection.getTransmitChannel();
 
-            boolean someDataHasSend = false;
+            boolean someDataHasSend;
 
-            int wrote = 0;
+            int wrote;
+            int dataReaded;
 
             // wrote  >  0  - wrote some data
-            // wrote  =  0  - no data written // need register(selector, SelectionKey.OP_WRITE, id);
-            // wrote  = -1  - connection closed
-
+            // wrote  =  0  - no data written    // need register(selector, SelectionKey.OP_WRITE, id);
 
             // пишем в сокет, пока есть что передавать
             // и сокет принимает данные (не затопился)
             do {
 
-                someDataHasSend = (!someDataHasSend) && (wrote > 0);
+                buffer.clear();
 
-                // не трогаем буфер
-                // он может содержать данные, которые он не смог отправить в прошлый раз
-                data.read(buffer);
+                // Add header if absent
+                if (!connection.isHeaderHasWrited()) {
+                    writeHeader(connection);
+                }
+
+                dataReaded = data.read(buffer);
                 buffer.flip();
             }
             while ((wrote = client.write(buffer)) > 0 &
-                   buffer.remaining() > 0);
+                   data.position() < data.size());
+
+            someDataHasSend = wrote > 0;
+
             // -------------------------------------------------
-            // Если хоть что-то передалось
+            // Если хоть что-то передалось - refresh client TTL
             if (someDataHasSend) {
-                // refresh client TTL
                 connectionList.update(id);
             }
             // -------------------------------------------------
 
             // причем, если не отправилось по сети, то в buffer будет лежать кусок
             // (скопированный из data), который так и не отправился
+            // буффер нужно очистить, а transmitChannel отмотать назад на размер прочтенных байт из data
             //
             // Это все к тому, то нельзя начинать передавать новые данные, пока по сети не передалось
             // текущее сообщение
 
+
             // -------------------------------------------------------------------------
             // Remote endpoint close connection
-            if (wrote < 0) {
-                System.out.println(key.attachment() + " отключился");
-                client.close();
-                connectionList.remove(id);
-            }
+//            if (wrote < 0) {
+//                System.out.println(key.attachment() + " отключился");
+//                connectionList.remove(id); // will close socket channel
+//            }
             // -------------------------------------------------------------------------
-            // Не смоглипередать все данные
+
+
+            // Не смогли передать все данные
             // Флудим сокет данными - он не успевает принимать на удаленном конце
             // регистрируемся на флаг что удаленный сокет может принимать сообщения
-            else if (buffer.remaining() > 0) {
+            // чтобы возобновить передачу как сокет будет готов передавать
+            else if (data.position() < data.size()) {
 
                 // Сохранить непереданный кусок данных для следущего цикла передачи
-                buffer.compact();
+                // отмотаем transmitChannel назад на размер буффера
+                data.position(data.position() - dataReaded);
 
                 // Выставляем бит OP_WRITE в 1 (подписываемся на флаг готовности сокета отправлять данные)
                 setInterest(key, SelectionKey.OP_WRITE);
-                // update selector (будем отправлять в следущем цикле)
+
+                // будим селектор (будем отправлять данные в следущем цикле)
                 selector.wakeup();
 
             }
             // -------------------------------------------------------------------------
-            // Все успешно записалось
-            // data.remaining() == 0
+            // Все успешно записалось, data.position == data.size
             else {
 
-                // refresh client TTL
-                connectionList.update(id);
+                // возвращаем обратно возможность писать заголовок для нового сообщения
+                // восстанавливаем новый цикл записи сообщений
+                connection.setHeaderHasWrited(false);
 
-                // Помечаем, что нет данных на передачу
-                connection.setReadChannel(null);
+                // Закрываем канал (откуда писали в сокет)
+                data.close();
+                
+                // обнуляем ссылку на transmitChannel
+                // (Защита от записи в сокет нового сообщения,
+                // если он еще не закончил передачу текущих данных)
+                connection.setTransmitChannel(null);
 
-                // prepare buffer to next transmit
+                // очищаем буффер для следущей передачи
                 buffer.clear();
 
-                // отписываемся от оповещения что сокет может отправлять данные
+                // отписываемся от оповещения что сокет готов передавать данные
                 // Выставляем в ключе бит OP_WRITE в 0 (отписываемся)
                 removeInterest(key, SelectionKey.OP_WRITE);
             }
             // -------------------------------------------------------------------------
 
+        }
+        // Remote endpoint close connection
+        catch(ClosedChannelException e) {
+            System.out.println(key.attachment() + " отключился");
+            connectionList.remove(id); // will close socket channel
+        }
+        catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+
+    /**
+     * Write header to connection.writeBuffer
+     */
+    private void writeHeader(Connection connection) {
+
+        try {
+
+            ByteBuffer buffer = connection.getWriteBuffer();
+            assert buffer.position() == 0;
+
+            // write message size
+            buffer.putLong(connection.getTransmitChannel().size());
+
+            // write message type
+            buffer.put((byte)connection.getMessageType().getValue());
+
+            connection.setHeaderHasWrited(true);
+
         } catch (Exception e) {
             e.printStackTrace();
         }
     }
+
+
+
+
+    // -------------------------------------------------------------------------------
 
 
     private void setInterest(SelectionKey key, int interest) {
@@ -436,7 +516,7 @@ public class FubarServer implements Runnable {
      * Подготавливает данные для записи в сокет,
      * подписывается(устанавливает) на флаг возможности записи в сокет
      */
-    private void scheduleWrite(SelectionKey key, ReadableByteChannel data) {
+    private void scheduleWrite(SelectionKey key, SeekableByteChannel data) {
 
         // Т.к. все асинхронное (несколько потоков)
         // То одному и тому же клиенту могут начать отправлять одновременно несколько сообщений -
@@ -454,15 +534,34 @@ public class FubarServer implements Runnable {
         // Можно, конечно валить все в сокет, (и больше ~3 метров в неблокирующем режиме не залезет)
         // дальше данные начнут теряться уже в сетевой подсистеме ядра при переполнении буффера сокета
 
-        if (connection.getReadChannel() != null) {
+        if (connection.getTransmitChannel() != null) {
             System.out.println("Внимание - обнаружена попытка одновременной передачи, данные НЕ отправлены");
             return;
         }
 
-        connection.setReadChannel(data);
+        // Задаем сокету данные на передачу
+        connection.setTransmitChannel(data);
+
         setInterest(key, SelectionKey.OP_WRITE);
     }
 
+
+    /**
+     * Whether receive text command or binary data
+     */
+    private void processInput(SelectionKey key) {
+
+        int id = (int)key.attachment();
+        Connection connection = connectionList.get(id);
+
+        if (connection.getMessageType() == Connection.MessageType.BINARY) {
+
+         }
+
+
+
+        processCommand(key, "123");
+    }
 
 
     /**
@@ -472,7 +571,7 @@ public class FubarServer implements Runnable {
      */
     private void processCommand(SelectionKey key, String command) {
 
-        String result;
+        String result = null;
         int id = (int)key.attachment();
         Connection connection = connectionList.get(id);
 
@@ -515,16 +614,11 @@ public class FubarServer implements Runnable {
                 try {
                     RandomAccessFile file = new RandomAccessFile(filePath.toString(), "r");
 
-                    // if file successfully opened
-                    connection.setFile(file);
+                    // if file successfully opened to read
+                    // store file channel
+                    connection.setTransmitChannel(file.getChannel());
 
-                    // Schedule switching to BINARY mode on next select loop.
-                    // Switching performed in write handlers, after sending
-                    // to client text notification that told to client
-                    // to switch to BINARY mode as server did
-                    connection.setNextMode(Connection.Mode.BINARY);
-
-                    result = Connection.Mode.BINARY.toString();
+                    //result = Connection.MessageType.BINARY.toString();
                 }
                 catch (Exception e) {
                     result = "I/O error";
@@ -534,6 +628,32 @@ public class FubarServer implements Runnable {
                 break;// ---------------------------------------------------------
 
 
+            case "set":
+
+                // file name not specified
+                if (parts.length < 2 ||
+                    isNullOrEmpty(parts[1])) {
+
+                    result = "invalid command args";
+                    break;
+                }
+
+                // set file
+                try {
+                    filePath = Paths.get(dataRoot + parts[1]);
+
+                    RandomAccessFile file = new RandomAccessFile(filePath.toString(), "w");
+
+                    // if file successfully opened to write
+                    // store file channel
+                    connection.setReceiveChannel(file.getChannel());
+                }
+                catch (Exception e) {
+                    result = "I/O error";
+                    e.printStackTrace();
+                }
+
+                break;// ---------------------------------------------------------
 
             default:
                 result = "unknown command";
@@ -541,13 +661,42 @@ public class FubarServer implements Runnable {
         }
 
 
-        // Отправляем (планируем отправку) клиенту текст (результат выполнения команды)
+        // Заланируем отправку клиенту результата выполнения команды
         if (!isNullOrEmpty(result)) {
             result +="\n";
-            ByteBuffer writeBuffer = ByteBuffer.wrap(result.getBytes());
-            writeChannelText(key, writeBuffer);
+
+            SeekableByteChannel data = new SeekableInMemoryByteChannel(result.getBytes());
+
+            // schedule sending greeting
+            scheduleWrite(key, data);
         }
     }
+
+
+
+
+    /*
+    private SeekableByteChannel wrapStringToChannel(String message)  {
+
+        SeekableByteChannel result = null;
+
+        try {
+
+            PipedInputStream pipedInputStream = new PipedInputStream();
+            PipedOutputStream pipedOutputStream = new PipedOutputStream();
+            pipedInputStream.connect(pipedOutputStream);
+
+            pipedOutputStream.write(message.getBytes());
+            result = (SeekableByteChannel)Channels.newChannel(pipedInputStream);
+
+        }
+        catch (Exception e) {
+            e.printStackTrace();
+        }
+
+        return result;
+    }
+    */
 
 
     // =============================================================================
@@ -585,11 +734,19 @@ public class FubarServer implements Runnable {
         service.scheduleAtFixedRate(
                 () -> connectionList.removeRotten(), ROTTEN_LATENCY, ROTTEN_LATENCY, TimeUnit.SECONDS);
     }
+
+
+
+    public void onDone(Void v) {
+        System.out.println("Done");
+    }
 }
 
 
 
 /*
+
+result = new String(bufferStream.toByteArray(), StandardCharsets.UTF_8).trim();
 
 
 

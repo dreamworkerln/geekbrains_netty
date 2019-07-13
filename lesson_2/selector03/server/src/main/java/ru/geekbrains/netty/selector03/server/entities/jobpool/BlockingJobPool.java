@@ -90,9 +90,16 @@ public class BlockingJobPool<T> extends BaseJobPool {
 
 
     /**
-     * WorkProcessable.work error handler - please handle you exeptions directly in job - this.add(Supplier T  job)
+     * WorkProcessable.work error handler
+     * please handle you exeptions directly in job (lambda) - this.add(Supplier T  job)
      */
     private T handle(T result, Throwable e) {
+
+        if (e != null) {
+            e.printStackTrace();
+        }
+
+
 
 //        //System.out.println("handle");
 //

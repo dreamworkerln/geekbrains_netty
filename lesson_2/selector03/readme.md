@@ -4,7 +4,7 @@ Message
 --------------------------------------------
 PAYLOAD_SIZE|MESSAGE_TYPE|PAYLOAD
 --------------------------------------------
-int32       |byte        |  byte[]
+int64       |byte        |  byte[]
 
 
 MESSAGE_TYPE
