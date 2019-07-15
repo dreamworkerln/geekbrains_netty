@@ -13,14 +13,12 @@ import java.nio.ByteBuffer;
 import java.nio.channels.ClosedChannelException;
 import java.nio.channels.SeekableByteChannel;
 import java.nio.channels.SocketChannel;
-import java.nio.charset.Charset;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.function.Function;
 
 import static ru.geekbrains.netty.selector03.common.entities.Utils.channelToString;
+import static ru.geekbrains.netty.selector03.common.entities.Utils.isNullOrEmpty;
 
 public class FubarClient implements Runnable {
 
@@ -32,7 +30,7 @@ public class FubarClient implements Runnable {
     public FubarClient() throws IOException {
 
         // Будут проблемы с путями
-        dataRoot = System.getProperty("user.dir") + "/client/data/";  //(? File.separator)
+        dataRoot = System.getProperty("user.dir") + "/data/";  //(? File.separator)
         Files.createDirectories(Paths.get(dataRoot));
 
         // in blocking mode
@@ -57,13 +55,18 @@ public class FubarClient implements Runnable {
 
             BufferedReader br = new BufferedReader(new InputStreamReader(System.in));
 
-            // endless loop
+            //noinspection InfiniteLoopStatement
             while(true) {
 
                 // get user input
                 String input = br.readLine();
 
-                parseUserInput(input);
+                String res = parseUserInput(input);
+
+                // invalid user input
+                if (!isNullOrEmpty(res)) {
+                    continue;
+                }
 
                 //send to server
                 SeekableByteChannel data = new SeekableInMemoryByteChannel(input.getBytes());
@@ -74,6 +77,8 @@ public class FubarClient implements Runnable {
                 readSocket();
 
                 processResponse();
+
+
 
 
             }
@@ -147,7 +152,7 @@ public class FubarClient implements Runnable {
                     }
                     else {
                         // пишем в файл
-                        data = connection.createReceiveFile();
+                        data = connection.createFileChannel(connection.getReceiveFilePath(), "rw");
                     }
                     // устанавливаем выбранный канал для connection в качестве канала-приемника
                     connection.setReceiveChannel(data);
@@ -167,6 +172,8 @@ public class FubarClient implements Runnable {
                 buffer.limit((int)Math.min(
                         (long)buffer.capacity(),
                         connection.remainingBytesToRead()));
+
+                //System.out.println(data.position() + " / " + data.size());
 
                 // преодалеваем упирание в блокирующий сокет (на чтение)
                 if (connection.remainingBytesToRead() == 0) {
@@ -304,6 +311,7 @@ public class FubarClient implements Runnable {
                 // И в readSocket() файл уже записался.
                 // Поэтому просто закрываем
                 receiveChannel.close();
+                System.out.println("transfer complete");
             }
 
 
@@ -315,9 +323,11 @@ public class FubarClient implements Runnable {
     // -----------------------------------------------------------------------------
 
 
-    private void parseUserInput(String command) {
+    private String parseUserInput(String command) {
 
         String[] parts = command.split(" ");
+        String preFilter = null;
+        Path filePath;
 
         switch (parts[0]) {
 
@@ -327,34 +337,12 @@ public class FubarClient implements Runnable {
                 if (parts.length < 2 ||
                     isNullOrEmpty(parts[1])) {
 
-                    textResponse = "invalid command args";
+                    preFilter = "invalid command args";
                     break;
                 }
 
-
-                Path filePath = Paths.get(dataRoot + parts[1]);
-
-                // file not exists
-                if (!Files.exists(filePath)) {
-                    textResponse = "file not exists";
-                    break;
-                }
-
-                // get file
-                try {
-                    RandomAccessFile file = new RandomAccessFile(filePath.toString(), "r");
-
-                    // if file successfully opened to read
-                    // store file channel
-                    //connection.setTransmitChannel(file.getChannel());
-
-                    // А тут будем отвечать клиенту файлом
-                    data = file.getChannel();
-                }
-                catch (Exception e) {
-                    textResponse = "I/O error";
-                    e.printStackTrace();
-                }
+                filePath = Paths.get(dataRoot + parts[1]);
+                connection.setReceiveFilePath(filePath);
 
                 break;// ---------------------------------------------------------
 
@@ -365,36 +353,31 @@ public class FubarClient implements Runnable {
                 if (parts.length < 2 ||
                     isNullOrEmpty(parts[1])) {
 
-                    textResponse = "invalid command args";
+                    preFilter = "invalid command args";
+                    break;
+                }
+
+                filePath = Paths.get(dataRoot + parts[1]);
+                // file not exists
+                if (!Files.exists(filePath)) {
+                    preFilter = "file not exists";
                     break;
                 }
 
                 // set file
                 try {
-                    filePath = Paths.get(dataRoot + parts[1]);
-
-                    connection.setReceiveFilePath(filePath);
-
-                    textResponse = "ready to receive";
+                    //data = connection.createFileChannel(filePath, "r");
                 }
                 catch (Exception e) {
-                    textResponse = "I/O error";
+                    preFilter = "I/O error";
                     e.printStackTrace();
                 }
 
                 break;// ---------------------------------------------------------
 
-            case "":
-
-                textResponse = "nop";
-
-                break;// ---------------------------------------------------------
-
-
-            default:
-                textResponse = "unknown command";
-                break;// ---------------------------------------------------------
         }
+
+        return preFilter;
 
     }
 

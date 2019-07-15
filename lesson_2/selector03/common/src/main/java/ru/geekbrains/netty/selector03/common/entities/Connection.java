@@ -12,7 +12,7 @@ import java.time.Instant;
 
 public class Connection {
 
-    public static final int BUFFER_SIZE = 15; // read and write buffer size
+    public static final int BUFFER_SIZE = 4*1024; // read and write buffer size
 
 
     private SelectionKey key;
@@ -297,18 +297,17 @@ public class Connection {
 
 
 
-    public FileChannel createReceiveFile() {
+    public FileChannel createFileChannel(Path path, String mode) {
 
         FileChannel result = null;
         try {
 
-            RandomAccessFile file = new RandomAccessFile(receiveFilePath.toString(), "w");
+            RandomAccessFile file = new RandomAccessFile(path.toString(), mode);
             result = file.getChannel();
 
         } catch (FileNotFoundException e) {
             e.printStackTrace();
         }
-
         return result;
     }
 
