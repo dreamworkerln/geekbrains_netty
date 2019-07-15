@@ -1,4 +1,4 @@
-package ru.geekbrains.netty.selector03.server.serverActions;
+package ru.geekbrains.netty.selector03.common.entities;
 
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;

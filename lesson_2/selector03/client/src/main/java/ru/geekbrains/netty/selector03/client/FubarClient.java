@@ -2,6 +2,7 @@ package ru.geekbrains.netty.selector03.client;
 
 import org.apache.commons.compress.utils.SeekableInMemoryByteChannel;
 import ru.geekbrains.netty.selector03.common.entities.Connection;
+import ru.geekbrains.netty.selector03.common.entities.DirectoryReader;
 import ru.geekbrains.netty.selector03.common.entities.MessageType;
 
 import java.io.BufferedReader;
@@ -16,6 +17,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.function.Function;
 
 import static ru.geekbrains.netty.selector03.common.entities.Utils.channelToString;
 import static ru.geekbrains.netty.selector03.common.entities.Utils.isNullOrEmpty;
@@ -188,7 +190,7 @@ public class FubarClient implements Runnable {
                         (long)buffer.capacity(),
                         connection.remainingBytesToRead()));
 
-                System.out.println("Rx: " + data.position() + " / " + totalToReceive);
+                //System.out.println("Rx: " + data.position() + " / " + totalToReceive);
 
                 //System.out.println(data.position() + " / " + data.size());
 
@@ -264,7 +266,7 @@ public class FubarClient implements Runnable {
                 // пока все не пролезет или не упадем
                 client.write(buffer);
 
-                System.out.println("Tx: " + data.position() + " / " + data.size());
+                //System.out.println("Tx: " + data.position() + " / " + data.size());
             }
             while (data.position() < data.size());
 
@@ -362,6 +364,20 @@ public class FubarClient implements Runnable {
 
         switch (parts[0]) {
 
+
+            case "lls":
+                Function<String,String> dirNfo = new DirectoryReader();
+                preFilter = dirNfo.apply(dataRoot);
+
+                if (preFilter.equals("")) {
+                    preFilter = ".";
+                }
+                else {
+                    preFilter = ".\n" + preFilter;
+                }
+
+                break;// ---------------------------------------------------------
+
             case "get":
 
                 // file name not specified
@@ -405,6 +421,10 @@ public class FubarClient implements Runnable {
                 }
 
                 break;// ---------------------------------------------------------
+
+            case "q":
+                System.exit(0);
+                break;// --------------------------------------------------------
 
         }
 

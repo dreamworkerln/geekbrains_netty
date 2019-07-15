@@ -4,7 +4,7 @@ import ru.geekbrains.netty.selector03.common.entities.Connection;
 import ru.geekbrains.netty.selector03.common.entities.MessageType;
 import ru.geekbrains.netty.selector03.server.entities.ConnectionList;
 import ru.geekbrains.netty.selector03.server.entities.jobpool.BlockingJobPool;
-import ru.geekbrains.netty.selector03.server.serverActions.DirectoryReader;
+import ru.geekbrains.netty.selector03.common.entities.DirectoryReader;
 
 import static ru.geekbrains.netty.selector03.common.entities.Utils.StringTochannel;
 import static ru.geekbrains.netty.selector03.common.entities.Utils.channelToString;
@@ -36,7 +36,8 @@ public class FubarServer implements Runnable {
 
     private ServerSocketChannel serverSocketChannel;
     private Selector selector;
-    private final String welcomeString = "Fubar Transfer Protocol server приветствует вас.";
+    private final String welcomeString = "Fubar Transfer Protocol server приветствует вас. " +
+                                         "Наберите help для получения списка комманд.";
 
     // Non-negative AtomicInteger incrementator
     private static IntUnaryOperator AtomicNonNegativeIntIncrementator = (i) -> i == Integer.MAX_VALUE ? 0 : i + 1;
@@ -698,7 +699,7 @@ public class FubarServer implements Runnable {
                     textResponse = ".";
                 }
                 else {
-                    textResponse = ".\n" + textResponse;                    
+                    textResponse = ".\n" + textResponse;
                 }
 
                 break;// ---------------------------------------------------------
@@ -761,9 +762,32 @@ public class FubarServer implements Runnable {
 
                 break;// ---------------------------------------------------------
 
+
+
+            case "help":
+            case "?":
+
+                textResponse =
+
+                        "lls - отобразить содержимое локальной папки data\n" +
+                        "ls - отобразить содержимое папки data на сервере\n" +
+                        "get <filename> скачать файл с сервера в локальную папку data\n"+
+                        "put <filename> загрузить файл из локальной папки data (надо знать его имя) " +
+                            "на сервер в папку data\n" +
+                        "help - эта справка";
+
+                break;// ---------------------------------------------------------
+
+
+
+
+
+
+
+
             case "":
 
-                textResponse = "nop";
+                textResponse = "\r";
 
                 break;// ---------------------------------------------------------
 
