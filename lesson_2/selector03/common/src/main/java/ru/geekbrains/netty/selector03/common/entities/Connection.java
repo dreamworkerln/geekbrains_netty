@@ -12,7 +12,7 @@ import java.time.Instant;
 
 public class Connection {
 
-    public static final int BUFFER_SIZE = 4*1024; // read and write buffer size
+    public static final int BUFFER_SIZE = 1024*1024; // read and write buffer size
 
 
     private SelectionKey key;
