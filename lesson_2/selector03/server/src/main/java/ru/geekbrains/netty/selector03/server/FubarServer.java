@@ -48,6 +48,7 @@ public class FubarServer implements Runnable {
     private BlockingJobPool<Void> jobPool =  new BlockingJobPool<>(4, this::onDone);
 
     private static final int PORT_NUMBER = 8000;
+    private static final String IP = "0.0.0.0";
     private String dataRoot;
 
 
@@ -58,7 +59,7 @@ public class FubarServer implements Runnable {
         Files.createDirectories(Paths.get(dataRoot));
 
         serverSocketChannel = ServerSocketChannel.open();
-        serverSocketChannel.socket().bind(new InetSocketAddress("127.0.0.1", PORT_NUMBER));
+        serverSocketChannel.socket().bind(new InetSocketAddress(IP, PORT_NUMBER));
         serverSocketChannel.configureBlocking(false);
 
         selector = Selector.open();
@@ -74,7 +75,7 @@ public class FubarServer implements Runnable {
 
         try {
 
-            System.out.println("Серверо запущено (Порт: " + PORT_NUMBER + ")");
+            System.out.println("Серверо запущено " + IP + ":" + PORT_NUMBER);
             Iterator<SelectionKey> it;
             SelectionKey key;
             // while true
@@ -124,7 +125,7 @@ public class FubarServer implements Runnable {
 
                             try {
 
-                                System.out.println("OP_READ job start");
+                                //System.out.println("OP_READ job start");
 
                                 // Если сообщение принято целиком,
                                 // то обработать его
@@ -251,7 +252,7 @@ public class FubarServer implements Runnable {
 
         try {
 
-            System.out.println("readSocket");
+            //System.out.println("readSocket");
 
             SocketChannel client = (SocketChannel)key.channel();
             id = (int)key.attachment();
@@ -314,7 +315,7 @@ public class FubarServer implements Runnable {
                     }
                     else {
                         // пишем в файл
-                        data = connection.createFileChannel(connection.getReceiveFilePath(), "w");
+                        data = connection.createFileChannel(connection.getReceiveFilePath(), "rw");
                     }
                     // устанавливаем выбранный канал для connection в качестве канала-приемника
                     connection.setReceiveChannel(data);
@@ -388,7 +389,7 @@ public class FubarServer implements Runnable {
 
 
 
-        System.out.println("readSocket END");
+        //System.out.println("readSocket END");
 
         return result;
     }
@@ -420,6 +421,8 @@ public class FubarServer implements Runnable {
             // wrote  >  0  - wrote some data
             // wrote  =  0  - no data written    // need register(selector, SelectionKey.OP_WRITE, id);
 
+            int bufferRemaining = -1;
+
             // пишем в сокет, пока есть что передавать
             // и сокет принимает данные (не затопился)
             while (data.position() < data.size()) {
@@ -433,10 +436,15 @@ public class FubarServer implements Runnable {
                 dataRead = data.read(buffer);
                 buffer.flip();
 
-                int remaining = buffer.remaining();
-
                 // пишем в сокет
                 wrote = client.write(buffer);
+
+                bufferRemaining = buffer.remaining();
+
+//                if (buffer.remaining() > 0) {
+//                    System.out.println(buffer.remaining() );
+//                }
+
 
                 if (!someDataHasSend) {
                     someDataHasSend = wrote > 0;
@@ -447,18 +455,11 @@ public class FubarServer implements Runnable {
 
                 // socket stall
                 // оставляем сокет в покое
-                if (remaining != wrote) {
+                if (bufferRemaining > 0) {
                     //System.out.println("WR: " + wrote);
                     break;
                 }
 
-
-
-
-
-//                if (wrote == 0) {
-//                    break;
-//                }
             }
 
             // -------------------------------------------------
@@ -477,10 +478,13 @@ public class FubarServer implements Runnable {
 
 
             // Не смогли передать все данные
-            // Флудим сокет данными - он не успевает принимать на удаленном конце
+            // Не прочитано целиком все из канала / остался последний неотправленный кусок в buffer
+            // Флудим сокет данными
+            // он не успевает передавать тут / принимать на удаленном конце
             // регистрируемся на флаг что удаленный сокет может принимать сообщения
             // чтобы возобновить передачу как сокет будет готов передавать
-            if (data.position() < data.size()) {
+            if (data.position() < data.size() ||
+                bufferRemaining > 0) {
 
                 // Сохранить непереданный кусок данных для следущего цикла передачи
                 // отмотаем transmitChannel назад на размер данных в буффере (которые не передались)
@@ -690,6 +694,13 @@ public class FubarServer implements Runnable {
                 Function<String,String> dirNfo = new DirectoryReader();
                 textResponse = dirNfo.apply(dataRoot);
 
+                if (textResponse.equals("")) {
+                    textResponse = ".";
+                }
+                else {
+                    textResponse = ".\n" + textResponse;                    
+                }
+
                 break;// ---------------------------------------------------------
 
 
@@ -725,7 +736,7 @@ public class FubarServer implements Runnable {
                 break;// ---------------------------------------------------------
 
 
-            case "set":
+            case "put":
 
                 // file name not specified
                 if (parts.length < 2 ||
@@ -741,7 +752,7 @@ public class FubarServer implements Runnable {
 
                     connection.setReceiveFilePath(filePath);
 
-                    textResponse = "ready to receive";
+                    textResponse = "ok"; // response OK
                 }
                 catch (Exception e) {
                     textResponse = "I/O error";
@@ -764,7 +775,7 @@ public class FubarServer implements Runnable {
 
 
         // Конвертируем текст - результат выполнения команды в channel
-        if (!isNullOrEmpty(textResponse)) {
+        if (textResponse != null) {
 
             data = connection.getBufferedTransmitChannel();
             // will write textResponse to data

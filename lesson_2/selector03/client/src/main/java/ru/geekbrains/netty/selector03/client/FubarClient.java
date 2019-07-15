@@ -7,12 +7,12 @@ import ru.geekbrains.netty.selector03.common.entities.MessageType;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
-import java.io.RandomAccessFile;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.ClosedChannelException;
 import java.nio.channels.SeekableByteChannel;
 import java.nio.channels.SocketChannel;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -22,10 +22,13 @@ import static ru.geekbrains.netty.selector03.common.entities.Utils.isNullOrEmpty
 
 public class FubarClient implements Runnable {
 
-    private SocketChannel socketChannel;
     private static final int PORT_NUMBER = 8000;
+    private static final String SERVER_HOST = "127.0.0.1";
+
+    private SocketChannel socketChannel;
     private String dataRoot;
     private Connection connection;
+    private SeekableByteChannel pendingFileTransfer;
 
     public FubarClient() throws IOException {
 
@@ -35,7 +38,7 @@ public class FubarClient implements Runnable {
 
         // in blocking mode
         socketChannel = SocketChannel.open();
-        socketChannel.connect((new InetSocketAddress("127.0.0.1", PORT_NUMBER)));
+        socketChannel.connect((new InetSocketAddress(SERVER_HOST, PORT_NUMBER)));
 
         //noinspection ConstantConditions
         connection = new Connection(socketChannel);
@@ -65,6 +68,7 @@ public class FubarClient implements Runnable {
 
                 // invalid user input
                 if (!isNullOrEmpty(res)) {
+                    System.out.println(res);
                     continue;
                 }
 
@@ -77,6 +81,13 @@ public class FubarClient implements Runnable {
                 readSocket();
 
                 processResponse();
+
+                // transfer file to server (if scheduled one)
+                if (pendingFileTransfer!= null) {
+                    connection.setTransmitChannel(pendingFileTransfer);
+                    writeSocket();
+                }
+
 
 
 
@@ -118,6 +129,8 @@ public class FubarClient implements Runnable {
             // подготавливаем буфер для чтения
             buffer.clear();
 
+            long totalToReceive = -1;
+
             // см FubarServer
             if(!connection.isReceiveHeaderPresent()) {
                 buffer.limit(8 + 1);
@@ -143,6 +156,8 @@ public class FubarClient implements Runnable {
                 // Узнаем тип сообщения и его размер
                 if (!connection.isReceiveHeaderPresent()) {
                     MessageType messageType = connection.parseHeader();
+
+                    totalToReceive = connection.remainingBytesToRead() - (8 + 1);
 
                     // Определяемся, куда сохранять данные
                     if(messageType == MessageType.TEXT) {
@@ -172,6 +187,8 @@ public class FubarClient implements Runnable {
                 buffer.limit((int)Math.min(
                         (long)buffer.capacity(),
                         connection.remainingBytesToRead()));
+
+                System.out.println("Rx: " + data.position() + " / " + totalToReceive);
 
                 //System.out.println(data.position() + " / " + data.size());
 
@@ -242,9 +259,12 @@ public class FubarClient implements Runnable {
 //                System.out.println("T: " + new String(bytes, StandardCharsets.UTF_8));
 //                buffer.rewind();
 
+
                 // пишем до упора, флудим сокет, висим на client.write(...)
                 // пока все не пролезет или не упадем
                 client.write(buffer);
+
+                System.out.println("Tx: " + data.position() + " / " + data.size());
             }
             while (data.position() < data.size());
 
@@ -258,6 +278,10 @@ public class FubarClient implements Runnable {
             // Закрываем файловый канал (откуда писали в сокет)
             if (connection.getChannelType(data) == MessageType.BINARY) {
                 data.close();
+
+                // помечаем, что мы закончили передачу файла на сервер
+                pendingFileTransfer = null;
+                System.out.println("transfer complete");
             }
             // Если это был текстовый канал, то ничего не делаем,
             // он там переиспользуется
@@ -294,7 +318,14 @@ public class FubarClient implements Runnable {
 
                 // display to user
                 String response = channelToString(receiveChannel);
-                System.out.println(response);
+
+
+                // При отправке сереверу команды на передачу файла
+                // сервер ответит, что он готов и ожидает передачу файла
+                // - не будем выводить это в консоль
+                if (pendingFileTransfer == null) {
+                    System.out.println(response);
+                }
 
                 // будем использовать повторно, без создания нового channel
                 // receiveChannel буфферезируется (backed by) bufferedReceiveChannel
@@ -347,7 +378,7 @@ public class FubarClient implements Runnable {
                 break;// ---------------------------------------------------------
 
 
-            case "set":
+            case "put":
 
                 // file name not specified
                 if (parts.length < 2 ||
@@ -366,7 +397,7 @@ public class FubarClient implements Runnable {
 
                 // set file
                 try {
-                    //data = connection.createFileChannel(filePath, "r");
+                    pendingFileTransfer = connection.createFileChannel(filePath, "r");
                 }
                 catch (Exception e) {
                     preFilter = "I/O error";
