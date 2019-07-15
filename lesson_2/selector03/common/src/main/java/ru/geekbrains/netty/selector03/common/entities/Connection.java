@@ -2,46 +2,17 @@ package ru.geekbrains.netty.selector03.common.entities;
 
 import org.apache.commons.compress.utils.SeekableInMemoryByteChannel;
 
+import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.io.RandomAccessFile;
 import java.nio.ByteBuffer;
 import java.nio.channels.*;
+import java.nio.file.Path;
 import java.time.Instant;
 
 public class Connection {
 
-    private static final int BUFFER_SIZE = 15; // read and write buffer size
-
-
-    public enum MessageType {
-        TEXT(0),
-        BINARY(1);
-
-        private int value;
-
-
-        MessageType(int value) {
-            this.value = value;
-        }
-
-        public int getValue() {
-            return value;
-        }
-
-        public static MessageType parse(int value) {
-
-            MessageType result = null;
-
-
-            if (value == 0) {
-                result = Connection.MessageType.TEXT;
-            }
-            else if (value == 1) {
-                result = Connection.MessageType.BINARY;
-            }
-
-            return result;
-        }
-    }
+    public static final int BUFFER_SIZE = 15; // read and write buffer size
 
 
     private SelectionKey key;
@@ -52,36 +23,47 @@ public class Connection {
     private SeekableByteChannel transmitChannel;  // канал на передачу данных клиенту
     private SeekableByteChannel receiveChannel;   // канал на прием данных от клиента
 
-    private boolean headerHasReaded; // заголовок принимаемого сообщения был прочитан
-    private boolean headerHasWrited; // в отправляемое сообщение был записан заголовок
+    // чтобы не плодить каналов через new()
+    public SeekableByteChannel bufferedTransmitChannel; // Используется для передачи текстовых данных
+    private SeekableByteChannel bufferedReceiveChannel; // Используется для приема текстовых данных
+
+    private boolean transmitHeaderPresent; // заголовок принимаемого сообщения был прочитан
+    private boolean receiveHeaderPresent; // в отправляемое сообщение был записан заголовок
 
     //private ByteBuffer data;        // emulating data(file) needed to be transferred to client
 
-    //private RandomAccessFile file; // работает с readBuffer/writeBuffer (замещая receiveChannel/transmitChannel)
+    private Path receiveFilePath;     // путь к файлу для приема
+
     private long remainingBytesToRead;
     //private ByteArrayOutputStream bufferStream; // работает с readBuffer при приеме текстового сообщения
 
-    // server state (text/binary)
-    private MessageType messageType;    // current messageType
+    // хотя можно просто унаследоваться от SeekableByteChannel и сделать два Channel
+    // TextChannel и BinaryChannel - в одном текст, в другом - файл
+    //private MessageType receiveMessageType;    // received message type
 
 
+
+    public Connection() {
+
+        bufferedTransmitChannel = new SeekableInMemoryByteChannel();
+        bufferedReceiveChannel = new SeekableInMemoryByteChannel();
+
+        this.readBuffer = ByteBuffer.allocate(BUFFER_SIZE);
+        this.writeBuffer = ByteBuffer.allocate(BUFFER_SIZE);
+    }
 
     public Connection(SelectionKey key, Instant time) {
+        this();
 
         this.key = key;
         this.channel = (SocketChannel)key.channel();
-        this.readBuffer = ByteBuffer.allocate(BUFFER_SIZE);
-        this.writeBuffer = ByteBuffer.allocate(BUFFER_SIZE);
-        this.messageType = MessageType.TEXT;
         this.time = time;
     }
 
     public Connection(SocketChannel channel) {
+        this();
 
         this.channel = channel;
-        this.readBuffer = ByteBuffer.allocate(BUFFER_SIZE);
-        this.writeBuffer = ByteBuffer.allocate(BUFFER_SIZE);
-        this.messageType = MessageType.TEXT;
     }
 
     public ByteBuffer getReadBuffer() {
@@ -124,38 +106,86 @@ public class Connection {
         this.receiveChannel = receiveChannel;
     }
 
-    public boolean isHeaderHasReaded() {
-        return headerHasReaded;
+    public boolean isTransmitHeaderPresent() {
+        return transmitHeaderPresent;
     }
 
-    public void setHeaderHasReaded(boolean headerHasReaded) {
-        this.headerHasReaded = headerHasReaded;
+    public void setTransmitHeaderPresent(boolean transmitHeaderPresent) {
+        this.transmitHeaderPresent = transmitHeaderPresent;
     }
 
 
-    public boolean isHeaderHasWrited() {
-        return headerHasWrited;
+    public boolean isReceiveHeaderPresent() {
+        return receiveHeaderPresent;
     }
 
-    public void setHeaderHasWrited(boolean headerHasWrited) {
-        this.headerHasWrited = headerHasWrited;
+    public void setReceiveHeaderPresent(boolean receiveHeaderPresent) {
+        this.receiveHeaderPresent = receiveHeaderPresent;
     }
 
-    public long getRemainingBytesToRead() {
+    public long remainingBytesToRead() {
         return remainingBytesToRead;
     }
 
-    public void setRemainingBytesToRead(long remainingBytesToRead) {
+    public void remainingBytesToRead(long remainingBytesToRead) {
         this.remainingBytesToRead = remainingBytesToRead;
     }
 
-    public MessageType getMessageType() {
-        return messageType;
+    public void decreaseRemainingBytesToRead(long amount) {
+        remainingBytesToRead-= amount;
     }
 
-    public void setMessageType(MessageType messageType) {
-        this.messageType = messageType;
+    public Path getReceiveFilePath() {
+        return receiveFilePath;
     }
+
+    public void setReceiveFilePath(Path receiveFilePath) {
+        this.receiveFilePath = receiveFilePath;
+    }
+
+    public SeekableByteChannel getBufferedTransmitChannel() {
+
+        try {
+            bufferedTransmitChannel.position(0);
+            bufferedTransmitChannel.truncate(0);
+
+            // Теперь transmitChannel ссылается на bufferedTransmitChannel
+            //transmitChannel = bufferedTransmitChannel;
+
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        return bufferedTransmitChannel;
+    }
+
+//    public void setBufferedTransmitChannel(SeekableByteChannel bufferedTransmitChannel) {
+//        this.bufferedTransmitChannel = bufferedTransmitChannel;
+//    }
+
+    public SeekableByteChannel getBufferedReceiveChannel() {
+
+        try {
+            bufferedReceiveChannel.position(0);
+            bufferedReceiveChannel.truncate(0);
+
+            // Теперь receiveChannel ссылается на bufferedReceiveChannel
+            //receiveChannel = bufferedReceiveChannel;
+
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        return bufferedReceiveChannel;
+    }
+
+//    public void setBufferedReceiveChannel(SeekableByteChannel bufferedReceiveChannel) {
+//        this.bufferedReceiveChannel = bufferedReceiveChannel;
+//    }
+
+    //    public MessageType getReceiveMessageType() {return receiveMessageType;}
+//
+//    public void setReceiveMessageType(MessageType receiveMessageType) {
+//        this.receiveMessageType = receiveMessageType;
+//    }
 
 
     // -----------------------------------------------------------------------------------
@@ -195,53 +225,93 @@ public class Connection {
 
         try {
 
-            ByteBuffer buffer = getWriteBuffer();
-            assert buffer.position() == 0;
+            assert writeBuffer.position() == 0;
 
             // write message size
-            buffer.putLong(getTransmitChannel().size());
+            writeBuffer.putLong(transmitChannel.size());
 
             // write message type
-            buffer.put((byte)getMessageType().getValue());
+            writeBuffer.put(getChannelType(transmitChannel).getValue());
 
-            setHeaderHasWrited(true);
+            setTransmitHeaderPresent(true);
 
         } catch (Exception e) {
             e.printStackTrace();
         }
     }
-
-
 
     /**
      * Read header from connection.readBuffer
      */
-    public void parseHeader() {
+    public MessageType parseHeader() {
+
+        MessageType result = null;
 
         try {
 
-            ByteBuffer buffer = getReadBuffer();
-
-            buffer.rewind();
+            // return to beginning of buffer
+            readBuffer.rewind();
 
             // get payload length
-            setRemainingBytesToRead(buffer.getLong());
+            remainingBytesToRead = readBuffer.getLong();
+
+            // позволим дальше писать в буфер
+            //readBuffer.limit(readBuffer.capacity());
+
+            // get message type
+            result = MessageType.parse(readBuffer.get());
+
 
             // увеличим количество байт для чтения на размер заголовка (8+1)
             // т.к. в цикле readSocket(..)
-            // В количество прочитанных байт из сокета 'read' войдет как длина заголовока,
-            // так и число прочтенных байт самого сообщения
-            setRemainingBytesToRead(getRemainingBytesToRead() + 8 + 1);
+            // в количество прочитанных байт из сокета 'read' вошли как длина заголовока,
+            // так и число прочтенных байт самого сообщения, поэтому возвращаем обратно
+            // (помечаем ка кнепрочитанные)
+            remainingBytesToRead += (8 + 1);  // int64 - message size + 1 byte message type
 
-            // get message type
-            setMessageType(Connection.MessageType.parse(buffer.get()));
-
-            setHeaderHasReaded(true);
+            setReceiveHeaderPresent(true);
 
         } catch (Exception e) {
             e.printStackTrace();
         }
+
+        return result;
     }
+
+    // =====================================================================
+
+
+    public MessageType getChannelType(SeekableByteChannel channel) {
+
+        MessageType result = null;
+
+        if (channel instanceof SeekableInMemoryByteChannel) {
+            result = MessageType.TEXT;
+        }
+        else if (channel instanceof FileChannel) {
+            result = MessageType.BINARY;
+        }
+
+        return result;
+    }
+
+
+
+    public FileChannel createReceiveFile() {
+
+        FileChannel result = null;
+        try {
+
+            RandomAccessFile file = new RandomAccessFile(receiveFilePath.toString(), "w");
+            result = file.getChannel();
+
+        } catch (FileNotFoundException e) {
+            e.printStackTrace();
+        }
+
+        return result;
+    }
+
 
 
 

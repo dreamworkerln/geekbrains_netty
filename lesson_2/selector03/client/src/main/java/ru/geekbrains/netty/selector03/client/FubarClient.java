@@ -2,17 +2,23 @@ package ru.geekbrains.netty.selector03.client;
 
 import org.apache.commons.compress.utils.SeekableInMemoryByteChannel;
 import ru.geekbrains.netty.selector03.common.entities.Connection;
+import ru.geekbrains.netty.selector03.common.entities.MessageType;
 
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.io.RandomAccessFile;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.ClosedChannelException;
 import java.nio.channels.SeekableByteChannel;
 import java.nio.channels.SocketChannel;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.function.Function;
 
 import static ru.geekbrains.netty.selector03.common.entities.Utils.channelToString;
 
@@ -57,6 +63,8 @@ public class FubarClient implements Runnable {
                 // get user input
                 String input = br.readLine();
 
+                parseUserInput(input);
+
                 //send to server
                 SeekableByteChannel data = new SeekableInMemoryByteChannel(input.getBytes());
                 connection.setTransmitChannel(data);
@@ -76,6 +84,8 @@ public class FubarClient implements Runnable {
 
     }
 
+
+
     /**
      * Читаем из сокета данные, сколько их там накопилось
      * Учитывая длину сообщения из заголовка
@@ -88,10 +98,9 @@ public class FubarClient implements Runnable {
 
             SocketChannel client = connection.getChannel();
             ByteBuffer buffer = connection.getReadBuffer();
-            SeekableByteChannel data = connection.getReceiveChannel();
 
-            // подготавливаем буфер для чтения
-            buffer.clear();
+            // Изначально не знаем что приедет - текст или файл
+            SeekableByteChannel data = connection.getReceiveChannel();
 
             int read;
 
@@ -99,57 +108,93 @@ public class FubarClient implements Runnable {
             // read =  0  - no data available (end of stream)
             // read = -1  - closed connection
 
+
+
+            // подготавливаем буфер для чтения
+            buffer.clear();
+
+            // см FubarServer
+            if(!connection.isReceiveHeaderPresent()) {
+                buffer.limit(8 + 1);
+            }
+            else {
+
+                buffer.limit((int)Math.min(
+                        (long)buffer.capacity(),
+                        connection.remainingBytesToRead()));
+            }
+
             while ((read = client.read(buffer)) > 0) {
 
                 buffer.flip();
 
-                // Parse header if didn't do it before
+//                byte[] bytes = new byte[buffer.limit()];
+//                buffer.get(bytes);
+//                System.out.println("R: " + new String(bytes, StandardCharsets.UTF_8));
+//                buffer.rewind();
+
+
+                // Parse header if didn't do it before ---------------------------------------
                 // Узнаем тип сообщения и его размер
-                if (!connection.isHeaderHasReaded()) {
-                    connection.parseHeader();
+                if (!connection.isReceiveHeaderPresent()) {
+                    MessageType messageType = connection.parseHeader();
 
                     // Определяемся, куда сохранять данные
-                    // Если это текстовый ответ на мой запрос, выделим под него канал
-                    if(connection.getMessageType() == Connection.MessageType.TEXT) {
+                    if(messageType == MessageType.TEXT) {
 
-                        // после обработки ответа этот канал будет закрыт
-                        connection.setReceiveChannel(new SeekableInMemoryByteChannel());
+                        // берем из буферный канал для текста
+                        data = connection.getBufferedReceiveChannel();
                     }
-                    // Если же это файл, то нас уже заранее заведен под него канал
-                    // и receiveChannel уже присвоен к RandomAccessFile
-                }
+                    else {
+                        // пишем в файл
+                        data = connection.createReceiveFile();
+                    }
+                    // устанавливаем выбранный канал для connection в качестве канала-приемника
+                    connection.setReceiveChannel(data);
+
+                } // -------------------------------------------------------------------------
 
                 // уменьшаем количество оставшихся байт сообщения для чтения
-                connection.setRemainingBytesToRead(connection.getRemainingBytesToRead() - read);
+                connection.decreaseRemainingBytesToRead(read);
 
+
+                assert data != null;
+                // пишем из буфера в канал
                 data.write(buffer);
-                buffer.clear();
 
-                // обходим упор в блокирующий сокет
-                if (connection.getRemainingBytesToRead() <= 0) {
+                // опять настраиваем буфер, чтоб жизнь медом не казалась
+                buffer.rewind();
+                buffer.limit((int)Math.min(
+                        (long)buffer.capacity(),
+                        connection.remainingBytesToRead()));
+
+                // преодалеваем упирание в блокирующий сокет (на чтение)
+                if (connection.remainingBytesToRead() == 0) {
                     break;
                 }
             }
 
             // возвращаем обратно возможность разбирать заголовок нового сообщения
-            connection.setHeaderHasReaded(false);
+            connection.setReceiveHeaderPresent(false);
 
             // Remote endpoint close connection
             if (read < 0) {
                 System.out.println("потеряна связь с сервером");
                 connection.close();
+                return;
             }
 
 
         }
         // Remote endpoint close connection
-        catch(ClosedChannelException e) {
-            System.out.println("потеряна связь с сервером");
-            connection.close();
-        }
         catch (Exception e) {
+            if (e instanceof ClosedChannelException) {
+                System.out.println("потеряна связь с сервером");
+                // Remote endpoint close connection
+                // (maybe not handled in "if (read < 0)")
+                connection.close(); // will close socket channel
+            }
             e.printStackTrace();
-            connection.close();
         }
 
         //System.out.println("readSocket end");
@@ -163,7 +208,7 @@ public class FubarClient implements Runnable {
 
         try {
 
-            System.out.println("writeSocket");
+            //System.out.println("writeSocket");
 
             SocketChannel client = connection.getChannel();
             ByteBuffer buffer = connection.getWriteBuffer();
@@ -178,12 +223,17 @@ public class FubarClient implements Runnable {
                 buffer.clear();
 
                 // Add header if absent
-                if (!connection.isHeaderHasWrited()) {
+                if (!connection.isTransmitHeaderPresent()) {
                     connection.writeHeader();
                 }
 
                 data.read(buffer);
                 buffer.flip();
+
+//                byte[] bytes = new byte[buffer.limit()];
+//                buffer.get(bytes);
+//                System.out.println("T: " + new String(bytes, StandardCharsets.UTF_8));
+//                buffer.rewind();
 
                 // пишем до упора, флудим сокет, висим на client.write(...)
                 // пока все не пролезет или не упадем
@@ -196,10 +246,14 @@ public class FubarClient implements Runnable {
 
             // возвращаем обратно возможность писать заголовок для нового сообщения
             // восстанавливаем новый цикл записи сообщений
-            connection.setHeaderHasWrited(false);
+            connection.setTransmitHeaderPresent(false);
 
-            // Закрываем канал (откуда писали в сокет)
-            data.close();
+            // Закрываем файловый канал (откуда писали в сокет)
+            if (connection.getChannelType(data) == MessageType.BINARY) {
+                data.close();
+            }
+            // Если это был текстовый канал, то ничего не делаем,
+            // он там переиспользуется
 
             // очищаем буффер для следущей передачи
             buffer.clear();
@@ -208,13 +262,14 @@ public class FubarClient implements Runnable {
 
         }
         // Remote endpoint close connection
-        catch(ClosedChannelException e) {
-            System.out.println("потеряна связь с сервером");
-            connection.close();
-        }
         catch (Exception e) {
+            if (e instanceof ClosedChannelException) {
+                System.out.println("потеряна связь с сервером");
+                // Remote endpoint close connection
+                // (maybe not handled in "if (read < 0)")
+                connection.close(); // will close socket channel
+            }
             e.printStackTrace();
-            connection.close(); // hm.. howto join this with previous one ?
         }
     }
 
@@ -224,23 +279,123 @@ public class FubarClient implements Runnable {
 
 
         try {
-            if (connection.getMessageType() == Connection.MessageType.TEXT) {
+
+            SeekableByteChannel receiveChannel =  connection.getReceiveChannel();
+
+            // Text message
+            if (connection.getChannelType(receiveChannel) == MessageType.TEXT) {
 
                 // display to user
-                String response = channelToString(connection.getReceiveChannel());
+                String response = channelToString(receiveChannel);
                 System.out.println(response);
+
+                // будем использовать повторно, без создания нового channel
+                // receiveChannel буфферезируется (backed by) bufferedReceiveChannel
+                // поэтому не закрываем, а truncate до 0
+                receiveChannel.position(0);
+                receiveChannel.truncate(0);
             }
             else {
 
                 // working with files
+
+
+                // там в прошлом через команду уже был настроен файл для приема
+                // И в readSocket() файл уже записался.
+                // Поэтому просто закрываем
+                receiveChannel.close();
             }
 
-            // Закрываем канал с принятыми и обработанными от сервера данными
-            connection.getReceiveChannel().close();
 
         } catch (IOException e) {
             e.printStackTrace();
         }
+    }
+
+    // -----------------------------------------------------------------------------
+
+
+    private void parseUserInput(String command) {
+
+        String[] parts = command.split(" ");
+
+        switch (parts[0]) {
+
+            case "get":
+
+                // file name not specified
+                if (parts.length < 2 ||
+                    isNullOrEmpty(parts[1])) {
+
+                    textResponse = "invalid command args";
+                    break;
+                }
+
+
+                Path filePath = Paths.get(dataRoot + parts[1]);
+
+                // file not exists
+                if (!Files.exists(filePath)) {
+                    textResponse = "file not exists";
+                    break;
+                }
+
+                // get file
+                try {
+                    RandomAccessFile file = new RandomAccessFile(filePath.toString(), "r");
+
+                    // if file successfully opened to read
+                    // store file channel
+                    //connection.setTransmitChannel(file.getChannel());
+
+                    // А тут будем отвечать клиенту файлом
+                    data = file.getChannel();
+                }
+                catch (Exception e) {
+                    textResponse = "I/O error";
+                    e.printStackTrace();
+                }
+
+                break;// ---------------------------------------------------------
+
+
+            case "set":
+
+                // file name not specified
+                if (parts.length < 2 ||
+                    isNullOrEmpty(parts[1])) {
+
+                    textResponse = "invalid command args";
+                    break;
+                }
+
+                // set file
+                try {
+                    filePath = Paths.get(dataRoot + parts[1]);
+
+                    connection.setReceiveFilePath(filePath);
+
+                    textResponse = "ready to receive";
+                }
+                catch (Exception e) {
+                    textResponse = "I/O error";
+                    e.printStackTrace();
+                }
+
+                break;// ---------------------------------------------------------
+
+            case "":
+
+                textResponse = "nop";
+
+                break;// ---------------------------------------------------------
+
+
+            default:
+                textResponse = "unknown command";
+                break;// ---------------------------------------------------------
+        }
+
     }
 
 

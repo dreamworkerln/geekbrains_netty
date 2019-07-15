@@ -2,10 +2,12 @@ package ru.geekbrains.netty.selector03.server;
 
 import org.apache.commons.compress.utils.SeekableInMemoryByteChannel;
 import ru.geekbrains.netty.selector03.common.entities.Connection;
+import ru.geekbrains.netty.selector03.common.entities.MessageType;
 import ru.geekbrains.netty.selector03.server.entities.ConnectionList;
 import ru.geekbrains.netty.selector03.server.entities.jobpool.BlockingJobPool;
 import ru.geekbrains.netty.selector03.server.serverActions.DirectoryReader;
 
+import static ru.geekbrains.netty.selector03.common.entities.Utils.StringTochannel;
 import static ru.geekbrains.netty.selector03.common.entities.Utils.channelToString;
 import static ru.geekbrains.netty.selector03.server.utils.Utils.isNullOrEmpty;
 
@@ -53,7 +55,7 @@ public class FubarServer implements Runnable {
     FubarServer() throws IOException {
 
         // Будут проблемы с путями
-        dataRoot = System.getProperty("user.dir") + "/server/data/";  //(? File.separator)
+        dataRoot = System.getProperty("user.dir") + "/data/";  //(? File.separator)
         Files.createDirectories(Paths.get(dataRoot));
 
         serverSocketChannel = ServerSocketChannel.open();
@@ -82,14 +84,19 @@ public class FubarServer implements Runnable {
                 selector.select();
                 it = selector.selectedKeys().iterator();
 
+                // ...
+                if (selector.selectedKeys().size() == 0) {
+                    continue;
+                }
+
                 System.out.println("SELECTING: " + selector.selectedKeys().size());
 
                 while (it.hasNext()) {
 
                     key = it.next();
 
-                    System.out.println("KEY INTERESTS: " + key.interestOps());
-                    System.out.println("KEY READY    : " + key.readyOps());
+                    //System.out.println("KEY INTERESTS: " + key.interestOps());
+                    //System.out.println("KEY READY    : " + key.readyOps());
 
 
                     it.remove();
@@ -105,20 +112,26 @@ public class FubarServer implements Runnable {
                     if (key.isReadable()) {
 
                         // Снипмаем подписку о получении новых данных в сокете
-                        // Чтобы не бегать бесконечно в цикле select
                         // пока поток из пула читает данные из сокета
+                        // Чтобы не бегать бесконечно в цикле select
                         removeInterest(key, SelectionKey.OP_READ);
 
                         // Читаем данные в отдельном потоке
-                        // Затем назначаем ее на выполнение
+                        // Если прочиталось все сообщение, то назначаем его на выполнение
                         // (выполняться будет потом в другом потоке)
+                        // Если целиком не прочиталось - будет дочитываться в других циклах select
                         SelectionKey finalKey = key;
                         jobPool.add(() -> {
 
                             try {
 
-                                readSocket(finalKey);
-                                processInput(finalKey);
+                                System.out.println("OP_READ job start");
+
+                                // Если сообщение принято целиком,
+                                // то обработать его
+                                if (readSocket(finalKey)) {
+                                    processInput(finalKey);
+                                }
 
                                 // Возвращаем подписку на флаг чтения новых данных из сокета
                                 setInterest(finalKey, SelectionKey.OP_READ);
@@ -194,7 +207,12 @@ public class FubarServer implements Runnable {
 
             connectionList.add(clientKey);
 
-            SeekableByteChannel data = new SeekableInMemoryByteChannel(welcomeString.getBytes());
+            //SeekableByteChannel data = new SeekableInMemoryByteChannel(welcomeString.getBytes());
+
+            Connection connection = connectionList.get(id);
+            SeekableByteChannel data = connection.getBufferedTransmitChannel();
+            // will write greeting to data
+            StringTochannel(welcomeString, data);
 
             // schedule sending greeting
             scheduleWrite(clientKey, data);
@@ -212,62 +230,100 @@ public class FubarServer implements Runnable {
     /**
      * Читаем из сокета данные, сколько их там накопилось
      * Учитывая длину сообщения из заголовка
+     *
+     * @return boolean сообщение принято целиком
      */
-    private void readSocket(SelectionKey key)  {
+    private boolean readSocket(SelectionKey key)  {
 
+        boolean result = false;
         int id = -1;
 
         try {
+
+            System.out.println("readSocket");
 
             SocketChannel client = (SocketChannel)key.channel();
             id = (int)key.attachment();
             Connection connection = connectionList.get(id);
 
+            // Изначально не знаем что приедет - текст или файл
             SeekableByteChannel data = connection.getReceiveChannel();
-            ByteBuffer buffer = connection.getReadBuffer();
 
-            // подготавливаем буфер для чтения
-            buffer.clear();
+            ByteBuffer buffer = connection.getReadBuffer();
 
             boolean someDataHasReadied = false;
 
-            int read;
+            int read; // сколько байт прочли из сокета
 
             // read >  0  - readied some data
             // read =  0  - no data available (end of stream)
             // read = -1  - closed connection
 
-            while ((read = client.read(buffer)) > 0) {
+
+            // подготавливаем буфер для чтения
+            buffer.clear();
+
+            // Еще не читали заголовок сообщения из сокета
+            // Устанавливаем limit буффера в размер заголовка
+            // и будем читать только заголовок
+            if(!connection.isReceiveHeaderPresent()) {
+                buffer.limit(8 + 1); // length + type
+            }
+            else {
+
+                // => проблема с ненужным вычитыванием начальных байтов следущего сообщения
+                // если сообщения идут подряд -
+                // то надо в начале вычитать только хедер, узнать сколько байт надо принять
+                // а потом выставить limit буфера в
+                // min(buffer.capacity, bytesRemaining)
+                // Чтобы буфер не прочел данные за концом текущего сообщения
+                // это будет начальные байты(заголовк) следущего сообщения
+                buffer.limit((int)Math.min(
+                        (long)buffer.capacity(),
+                        connection.remainingBytesToRead()));
+            }
+
+            while ((read = client.read(buffer)) > 0) { // ----------------------------------------------
 
                 buffer.flip();
 
                 // устанавливаем флаг что что-то смогли прочитать из сокета
                 someDataHasReadied = true;
 
-                // Parse header if didn't do it before
-                // Узнаем тип сообщения и его размер, и выделяем канал, если это команда
-                if (!connection.isHeaderHasReaded()) {
-                    connection.parseHeader();
+                // Parse header if didn't do it before ---------------------------------------
+                // Узнаем тип сообщения и его размер
+                if (!connection.isReceiveHeaderPresent()) {
+                    MessageType messageType = connection.parseHeader();
 
                     // Определяемся, куда сохранять данные
-                    // Если это текстовая команда, выделим под нее канал
-                    if(connection.getMessageType() == Connection.MessageType.TEXT) {
+                    if(messageType == MessageType.TEXT) {
 
-                        // после разборки команды этот канал будет закрыт
-                        connection.setReceiveChannel(new SeekableInMemoryByteChannel());
+                        // берем из буферный канал для текста
+                        data = connection.getBufferedReceiveChannel();
                     }
-                    // Если же это файл, то нас уже заранее командой попросили принять файл
-                    // и receiveChannel уже присвоен к RandomAccessFile
-                }
+                    else {
+                        // пишем в файл
+                        data = connection.createReceiveFile();
+                    }
+                    // устанавливаем выбранный канал для connection в качестве канала-приемника
+                    connection.setReceiveChannel(data);
 
+                } // -------------------------------------------------------------------------
 
                 // уменьшаем количество оставшихся байт сообщения для чтения
-                connection.setRemainingBytesToRead(connection.getRemainingBytesToRead() - read);
+                connection.decreaseRemainingBytesToRead(read);
 
 
+                assert data != null;
+                // пишем из буфера в канал
                 data.write(buffer);
-                buffer.clear();
-            }
+
+                // опять настраиваем буфер, чтоб жизнь медом не казалась
+                buffer.rewind();
+                buffer.limit((int)Math.min(
+                        (long)buffer.capacity(),
+                        connection.remainingBytesToRead()));
+            } // ------------------------------------------------------------------------------------
 
             // -------------------------------------------------
             // Если хоть что-то передалось
@@ -281,26 +337,49 @@ public class FubarServer implements Runnable {
             if (read < 0) {
                 System.out.println(key.attachment() + " отключился");
                 connectionList.remove(id); // will close socket channel
+                return false;
             }
+
+            // Тут еще возможен вариант:
+            // прочли не все, возможно оставшиеся байты сообщения
+            // прижут позднее
 
             // Приняли все байты сообщения
-            // там nc добавляет в конец сообщения '#10', поэтому на слякий случай проверяем <=0
-            if(connection.getRemainingBytesToRead() <= 0)  {
+            if(connection.remainingBytesToRead() == 0)  {
+
+                // Сообщение прочиталось целиком
+                result = true;
 
                 // возвращаем обратно возможность разбирать заголовок нового сообщения
-                connection.setHeaderHasReaded(false);
+                connection.setReceiveHeaderPresent(false);
+
+                // очищаем буффер для следущего приема (не обязательно)
+                buffer.clear();
+
             }
 
-        }
-        // Remote endpoint close connection
-        // maybe not happened: handled in "if (read < 0)"
-        catch(ClosedChannelException e) {
-            System.out.println(key.attachment() + " отключился");
-            connectionList.remove(id); // will close socket channel
+//            assert data != null;
+//            long pos = data.position();
+//            System.out.println("R: " + channelToString(data));
+//            data.position(pos);
+
+
         }
         catch (Exception e) {
+            if (e instanceof ClosedChannelException) {
+                System.out.println(key.attachment() + " отключился");
+                // Remote endpoint close connection
+                // (maybe not handled in "if (read < 0)")
+                connectionList.remove(id); // will close socket channel
+            }
             e.printStackTrace();
         }
+
+
+
+        System.out.println("readSocket END");
+
+        return result;
     }
 
 
@@ -322,32 +401,64 @@ public class FubarServer implements Runnable {
             ByteBuffer buffer = connection.getWriteBuffer();
             SeekableByteChannel data = connection.getTransmitChannel();
 
-            boolean someDataHasSend;
+            boolean someDataHasSend = false;
 
-            int wrote;
-            int dataReaded;
+            int wrote;    // сколько байт записали в сокет
+            int dataRead; // сколько байт прочли из канала
 
             // wrote  >  0  - wrote some data
             // wrote  =  0  - no data written    // need register(selector, SelectionKey.OP_WRITE, id);
 
             // пишем в сокет, пока есть что передавать
             // и сокет принимает данные (не затопился)
-            do {
-
-                buffer.clear();
+            while (data.position() < data.size()) {
 
                 // Add header if absent
-                if (!connection.isHeaderHasWrited()) {
+                if (!connection.isTransmitHeaderPresent()) {
                     connection.writeHeader();
                 }
 
-                dataReaded = data.read(buffer);
+                //  читаем из канала в буффер
+                dataRead = data.read(buffer);
                 buffer.flip();
-            }
-            while ((wrote = client.write(buffer)) > 0 &
-                   data.position() < data.size());
 
-            someDataHasSend = wrote > 0;
+                // пишем в сокет
+                wrote = client.write(buffer);
+
+                // что не залезло в сокет помещаем в начало буфера
+                buffer.compact();
+
+                if (!someDataHasSend) {
+                    someDataHasSend = wrote > 0;
+                }
+
+                // socket stall
+                // оставляем сокет в покое
+                if (wrote == 0) {
+                    break;
+                }
+            }
+
+
+
+
+//            do {
+//
+//                if (buffer.position() < buffer.limit()) {
+//                    buffer.compact();
+//                }
+//
+//                // Add header if absent
+//                if (!connection.isTransmitHeaderPresent()) {
+//                    connection.writeHeader();
+//                }
+//
+//                dataRead = data.read(buffer);
+//                buffer.flip();
+//            }
+//            while ((wrote = client.write(buffer)) > 0 &
+//                   data.position() < data.size());
+
 
             // -------------------------------------------------
             // Если хоть что-то передалось - refresh client TTL
@@ -371,8 +482,8 @@ public class FubarServer implements Runnable {
             if (data.position() < data.size()) {
 
                 // Сохранить непереданный кусок данных для следущего цикла передачи
-                // отмотаем transmitChannel назад на размер буффера
-                data.position(data.position() - dataReaded);
+                // отмотаем transmitChannel назад на размер данных в буффере (которые не передались)
+                data.position(data.position() - buffer.position());
 
                 // Выставляем бит OP_WRITE в 1 (подписываемся на флаг готовности сокета отправлять данные)
                 setInterest(key, SelectionKey.OP_WRITE);
@@ -387,10 +498,15 @@ public class FubarServer implements Runnable {
 
                 // возвращаем обратно возможность писать заголовок для нового сообщения
                 // восстанавливаем новый цикл записи сообщений
-                connection.setHeaderHasWrited(false);
+                connection.setTransmitHeaderPresent(false);
 
-                // Закрываем канал (откуда писали в сокет)
-                data.close();
+                // Закрываем файловый канал (откуда писали в сокет)
+                if (connection.getChannelType(data) == MessageType.BINARY) {
+                    data.close();
+                }
+                // Если это был текстовый канал, то ничего не делаем,
+                // он там переиспользуется
+
 
                 // обнуляем ссылку на transmitChannel
                 // (Защита от записи в сокет нового сообщения,
@@ -406,21 +522,30 @@ public class FubarServer implements Runnable {
             }
             // -------------------------------------------------------------------------
 
-        }
-        // Remote endpoint close connection
-        catch(ClosedChannelException e) {
-            System.out.println(key.attachment() + " отключился");
-            connectionList.remove(id); // will close socket channel
+
+//            long pos = data.position();
+//            System.out.println("T: " + channelToString(data));
+//            data.position(pos);
+
         }
         catch (Exception e) {
+            if (e instanceof ClosedChannelException) {
+                System.out.println(key.attachment() + " отключился");
+                // Remote endpoint close connection
+                connectionList.remove(id); // will close socket channel
+            }
             e.printStackTrace();
         }
+
+        System.out.println("writeSocket END");
     }
 
     // -------------------------------------------------------------------------------
 
 
     private void setInterest(SelectionKey key, int interest) {
+
+        //System.out.println("setInterest ON: " + interest);
 
         if (key.isValid() &&
             (key.interestOps() & interest) == 0) {
@@ -432,6 +557,8 @@ public class FubarServer implements Runnable {
 
 
     private void removeInterest(SelectionKey key, int interest) {
+
+        //System.out.println("setInterest OFF: " + interest);
 
         if (key.isValid() &&
             (key.interestOps() & interest) != 0) {
@@ -457,31 +584,36 @@ public class FubarServer implements Runnable {
      */
     private void scheduleWrite(SelectionKey key, SeekableByteChannel data) {
 
-        // Т.к. все асинхронное (несколько потоков)
-        // То одному и тому же клиенту могут начать отправлять одновременно несколько сообщений -
-        // Надо делать очередь сообщений (на отправку) для клиента.
-        // (Если не охота потом принимать байты(куски байт) сообщений в перемешанном порядке)
-        // (Люди говорят для TCP такое можно устроить, для UDP - нет)
-        // (Потом, например, удалять только те сообщения, котороые удалось доставить, и т.д.)
+        try {
+            // Т.к. все асинхронное (несколько потоков)
+            // То одному и тому же клиенту могут начать отправлять одновременно несколько сообщений -
+            // Надо делать очередь сообщений (на отправку) для клиента.
+            // (Если не охота потом принимать байты(куски байт) сообщений в перемешанном порядке)
+            // (Люди говорят для TCP такое можно устроить, для UDP - нет)
+            // (Потом, например, удалять только те сообщения, котороые удалось доставить, и т.д.)
 
-        int id = (int)key.attachment();
-        Connection connection = connectionList.get(id);
+            int id = (int)key.attachment();
+            Connection connection = connectionList.get(id);
 
-        // Проверить нет ли текущих данных на отправку (в connectionList)
-        // и если есть, то не отправлять - просто потерять это данные (ибо нефиг)
+            // Проверить нет ли текущих данных на отправку (в connectionList)
+            // и если есть, то не отправлять - просто потерять это данные (ибо нефиг)
 
-        // Можно, конечно валить все в сокет, (и больше ~3 метров в неблокирующем режиме не залезет)
-        // дальше данные начнут теряться уже в сетевой подсистеме ядра при переполнении буффера сокета
+            // Можно, конечно валить все в сокет, (и больше ~3 метров в неблокирующем режиме не залезет)
+            // дальше данные начнут теряться уже в сетевой подсистеме ядра при переполнении буффера сокета
+            if (connection.getTransmitChannel() != null) {
+                System.out.println("Внимание - обнаружена попытка одновременной передачи, данные НЕ отправлены");
+                return;
+            }
 
-        if (connection.getTransmitChannel() != null) {
-            System.out.println("Внимание - обнаружена попытка одновременной передачи, данные НЕ отправлены");
-            return;
+            // Задаем сокету данные на передачу
+            data.position(0);
+            connection.setTransmitChannel(data);
+
+            setInterest(key, SelectionKey.OP_WRITE);
+
+        } catch (Exception e) {
+            e.printStackTrace();
         }
-
-        // Задаем сокету данные на передачу
-        connection.setTransmitChannel(data);
-
-        setInterest(key, SelectionKey.OP_WRITE);
     }
 
 
@@ -490,27 +622,36 @@ public class FubarServer implements Runnable {
 
 
     /**
-     * Whether receive text command or binary data
+     * Process received channel (containing text command or file)
      */
     private void processInput(SelectionKey key) {
 
         try {
             int id = (int)key.attachment();
             Connection connection = connectionList.get(id);
+            SeekableByteChannel receiveChannel =  connection.getReceiveChannel();
 
-            if (connection.getMessageType() == Connection.MessageType.TEXT) {
+            // Text message
+            if (connection.getChannelType(connection.getReceiveChannel()) == MessageType.TEXT) {
 
-                String command = channelToString(connection.getReceiveChannel());
+                String command = channelToString(receiveChannel);
 
                 processCommand(key, command);
+
+                // будем использовать повторно, без создания нового channel
+                // receiveChannel backed by bufferedReceiveChannel
+                // поэтому не закрываем, а truncate до 0
+                receiveChannel.position(0);
+                receiveChannel.truncate(0);
             }
+            // File message
             else {
-                // там в прошлом через команду уже настроен файл для приема
+
+                // там в прошлом через команду уже был настроен файл для приема
+                // И в readSocket() файл уже записался.
+                // Поэтому просто закрываем
+                receiveChannel.close();
             }
-
-            // Закрываем канал с принятыми и обработанными от сервера данными
-            connection.getReceiveChannel().close();
-
 
         } catch (IOException e) {
             e.printStackTrace();
@@ -532,10 +673,10 @@ public class FubarServer implements Runnable {
         int id = (int)key.attachment();
         Connection connection = connectionList.get(id);
 
-        // No input
-        if (isNullOrEmpty(command)) {
-            return;
-        }
+//        // No input
+//        if (isNullOrEmpty(command)) {
+//            return;
+//        }
 
         String[] parts = command.split(" ");
 
@@ -600,12 +741,9 @@ public class FubarServer implements Runnable {
                 try {
                     filePath = Paths.get(dataRoot + parts[1]);
 
-                    RandomAccessFile file = new RandomAccessFile(filePath.toString(), "w");
+                    connection.setReceiveFilePath(filePath);
 
-                    // if file successfully opened to write
-                    // store file channel
-                    connection.setReceiveChannel(file.getChannel());
-                    textResponse = "ok";
+                    textResponse = "ready to receive";
                 }
                 catch (Exception e) {
                     textResponse = "I/O error";
@@ -614,19 +752,28 @@ public class FubarServer implements Runnable {
 
                 break;// ---------------------------------------------------------
 
+            case "":
+
+                textResponse = "nop";
+
+                break;// ---------------------------------------------------------
+
+
             default:
                 textResponse = "unknown command";
                 break;// ---------------------------------------------------------
         }
 
 
-        // Заланируем отправку клиенту результата выполнения команды - текст
+        // Конвертируем текст - результат выполнения команды в channel
         if (!isNullOrEmpty(textResponse)) {
 
-            data = new SeekableInMemoryByteChannel(textResponse.getBytes());
+            data = connection.getBufferedTransmitChannel();
+            // will write textResponse to data
+            StringTochannel(textResponse, data);
         }
 
-        assert data!=null;
+        assert data != null;
 
         // schedule sending response to command (text)
         scheduleWrite(key, data);
