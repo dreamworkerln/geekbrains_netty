@@ -26,11 +26,11 @@ import java.util.function.Supplier;
  */
 public class BlockingJobPool<T> extends BaseJobPool {
 
+    private int queueSize;
 
 
-    private Semaphore semaphore;
 
-    private ThreadPoolExecutor threadPool;
+    //private Semaphore semaphore;
 
     // ThreadPoolExecutor.getActiveCount() precious replacement
     private final AtomicInteger workingThreadCnt = new AtomicInteger(0);
@@ -38,24 +38,38 @@ public class BlockingJobPool<T> extends BaseJobPool {
     // On job done handler
     private Consumer<T> callback;
 
-    private final AtomicInteger threadCount = new AtomicInteger(0);
+    //private final AtomicInteger threadCount = new AtomicInteger(0);
 
     /**
      * Pool of worker threads
      * @param poolSize pool size (count of threads)
      * @param callback handler onComplete event
      */
-    public BlockingJobPool(int poolSize,
-                           Consumer<T> callback) {
+    public BlockingJobPool(int poolSize, Consumer<T> callback) {
+
+        queueSize = poolSize*2;
 
         final CustomizableThreadFactory threadFactory = new CustomizableThreadFactory();
         threadFactory.setDaemon(true);
         threadFactory.setThreadNamePrefix("BlockingPool-");
 
-        threadPool = (ThreadPoolExecutor)Executors.newFixedThreadPool(poolSize, threadFactory);
+//        BlockingQueue<Runnable> queue = new LinkedBlockingQueue<Runnable>(4);
+//        ThreadPoolExecutor executor = new ThreadPoolExecutor(10, 10, 1000,
+//                TimeUnit.MILLISECONDS, queue);
+
+
+        threadPool = new ThreadPoolExecutor(
+                poolSize,
+                poolSize,
+                0,
+                TimeUnit.SECONDS, new LinkedBlockingQueue<>(queueSize),
+                threadFactory);
+
+        //threadPool = (ThreadPoolExecutor)Executors.newFixedThreadPool(poolSize, threadFactory);
+
         this.callback = callback;
 
-        semaphore = new Semaphore(poolSize, true);
+        //semaphore = new Semaphore(poolSize, true);
     }
 
     /**
@@ -67,22 +81,22 @@ public class BlockingJobPool<T> extends BaseJobPool {
      */
     public void add(Supplier<T> job) {
 
-        try {
-            semaphore.acquire();
+        //try {
+            //semaphore.acquire();
 
-            threadCount.getAndIncrement();
+            workingThreadCnt.getAndIncrement();
 
             CompletableFuture.supplyAsync(job, threadPool)
                     .handle(this::handle)
                     .thenAccept(this::callback);
 
-        }
+        //}
         // stop job evaluation if interrupted
-        catch (InterruptedException e) {
-
-            // if thread was interrupted inside job
-            semaphore.release();
-        }
+//        catch (InterruptedException e) {
+//
+//            // if thread was interrupted inside job
+//            //semaphore.release();
+//        }
     }
 
 
@@ -100,24 +114,6 @@ public class BlockingJobPool<T> extends BaseJobPool {
         }
 
 
-
-//        //System.out.println("handle");
-//
-//        // not forget to check if (e == null)
-//        while (e != null && !(e instanceof PayloadedException)) {
-//            e = e.getCause();
-//        }
-//
-//        if (e != null) {
-//            //System.out.println("error");
-//
-//            // Создаем экземпляр класса T (путем вызова Function<Object,T> creator)
-//            // и передаем в конструктор PayloadedException.getPayload() - id задачи
-//            // Таким образом вызывающая сторона узнает, что задача с указанным id не была выполнена
-//            // Т.к. у T есть поле T.isOk = false, и оно становится == true только при успешном выполнении job
-//            result = creator.apply(((PayloadedException)e).getPayload());
-//        }
-
         return result;
     }
 
@@ -131,13 +127,13 @@ public class BlockingJobPool<T> extends BaseJobPool {
         // notify caller about job done
         callback.accept(msg);
 
-        threadCount.getAndDecrement();
-        semaphore.release();
+        workingThreadCnt.getAndDecrement();
+        //semaphore.release();
     }
 
 
     public boolean isFull() {
-        return threadCount.get() == threadPool.getMaximumPoolSize();
+        return workingThreadCnt.get() == threadPool.getMaximumPoolSize();
     }
 
 
@@ -147,132 +143,4 @@ public class BlockingJobPool<T> extends BaseJobPool {
 }
 
 
-/*
-class ExampleService {
-
-    // -----------------------------------------------------------
-
-
-
-    JobResult work(int id, String data) {
-
-        JobResult result = null;
-
-        try {
-            String name = Thread.currentThread().getName();
-            long timeout = 1000;
-            //System.out.printf("%s sleeping %d %s...%n", name, timeout, "ms");
-            Thread.sleep(1000);
-
-            char[] str = new char[6];
-            ThreadLocalRandom current = ThreadLocalRandom.current();
-
-            int i = 100000 + current.nextInt(900000);
-
-
-            if (i > 900000)
-                throw new IllegalArgumentException(id + ": Надоело");
-
-            result = new JobResult(id, Integer.toString(i));
-
-        }
-        catch (IllegalArgumentException e) {
-            throw e;
-        }
-        catch (Exception e) {
-
-            System.out.println("Error: " + e);
-        }
-        return result;
-    }
-
-}
-*/
-
-
-
-
-
-/*
-
-
-        // Handle exception ---------------------------------------------
-        f.handle((result, throwable) -> {
-
-                    System.out.println("Error: " + throwable.toString());
-
-                    // may be null
-                    return result;
-                });
-        // --------------------------------------------------------------
- */
-
-
-
-
-/*
-
-
-    //private ReentrantLock lock = new ReentrantLock();
-    //private Condition lockCondition = lock.newCondition();
-
-    // ThreadPoolExecutor.getActiveCount() precious replacement
-    // private final AtomicInteger threadCount = new AtomicInteger(0);
-
-
-
-
-
-    public void add(Supplier<T> job) {
-
-
-
-            // wait if ThreadPoolExecutor threads is busy
-        lock.lock();
-
-        // threadPool.getActiveCount() is laggy and inaccurate
-        while (threadCount.get() == threadPool.getMaximumPoolSize()) {
-            try {
-
-                lockCondition.await(1000, TimeUnit.MILLISECONDS); // Suspend BlockingJobPool.add caller thread
-            }
-            catch (InterruptedException ignore) {}
-        }
-
-        lock.unlock();
-
-        // increasing busy thread counter
-        threadCount.getAndIncrement();
-
-
-
-        ...
-    }
-
-
-
-
-
-
-
-    private void callback(T msg) {
-
-    // decreasing busy thread counter
-    threadCount.getAndDecrement();
-
-    // notify about job done
-    callback.accept(msg);
-
-    // resume BlockingJobPool.add waiting thread if exists one
-    lock.lock();
-    lockCondition.signal();
-    lock.unlock();
-
-
-}
-
-
-
-
-*/
 

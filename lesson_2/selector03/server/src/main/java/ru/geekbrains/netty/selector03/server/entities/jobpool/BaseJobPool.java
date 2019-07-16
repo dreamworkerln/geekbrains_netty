@@ -6,7 +6,7 @@ import java.util.concurrent.locks.ReentrantLock;
 public class BaseJobPool {
 
     private ReentrantLock watchdogLock = new ReentrantLock();
-    private ThreadPoolExecutor threadPool;
+    protected ThreadPoolExecutor threadPool;
 
 
     /**
