@@ -35,6 +35,7 @@ public class Connection {
     private Path receiveFilePath;     // путь к файлу для приема
 
     private long remainingBytesToRead;
+    private long remainingBytesToWrite;
     //private ByteArrayOutputStream bufferStream; // работает с readBuffer при приеме текстового сообщения
 
     // хотя можно просто унаследоваться от SeekableByteChannel и сделать два Channel
@@ -128,12 +129,29 @@ public class Connection {
     }
 
     public void remainingBytesToRead(long remainingBytesToRead) {
+
         this.remainingBytesToRead = remainingBytesToRead;
     }
 
     public void decreaseRemainingBytesToRead(long amount) {
         remainingBytesToRead-= amount;
     }
+
+
+
+
+    public long remainingBytesToWrite() {
+        return remainingBytesToWrite;
+    }
+
+    public void remainingBytesToWrite(long remainingBytesToWrite) {
+        this.remainingBytesToWrite = remainingBytesToWrite;
+    }
+
+    public void decreaseRemainingBytesToWrite(long amount) {
+        remainingBytesToWrite-= amount;
+    }
+
 
     public Path getReceiveFilePath() {
         return receiveFilePath;
@@ -227,11 +245,21 @@ public class Connection {
 
             assert writeBuffer.position() == 0;
 
+            remainingBytesToWrite = transmitChannel.size();
+
             // write message size
             writeBuffer.putLong(transmitChannel.size());
 
             // write message type
             writeBuffer.put(getChannelType(transmitChannel).getValue());
+
+
+            // увеличим количество байт для записи на размер заголовка (8+1)
+            // т.к. в цикле writeSocket(..)
+            // в количество записанных байт из сокета 'write' вошли как длина заголовока,
+            // так и число записанных байт самого сообщения, поэтому возвращаем обратно
+            // (помечаем как не записанные)
+            remainingBytesToWrite += (8 + 1);  // int64 - message size + 1 byte message type
 
             setTransmitHeaderPresent(true);
 
@@ -266,7 +294,7 @@ public class Connection {
             // т.к. в цикле readSocket(..)
             // в количество прочитанных байт из сокета 'read' вошли как длина заголовока,
             // так и число прочтенных байт самого сообщения, поэтому возвращаем обратно
-            // (помечаем ка кнепрочитанные)
+            // (помечаем как не прочитанные)
             remainingBytesToRead += (8 + 1);  // int64 - message size + 1 byte message type
 
             setReceiveHeaderPresent(true);

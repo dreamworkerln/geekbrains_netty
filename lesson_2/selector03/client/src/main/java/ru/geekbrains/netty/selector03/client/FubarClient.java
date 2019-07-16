@@ -190,7 +190,7 @@ public class FubarClient implements Runnable {
                         (long)buffer.capacity(),
                         connection.remainingBytesToRead()));
 
-                //System.out.println("Rx: " + data.position() + " / " + totalToReceive);
+                System.out.println("Rx: " + data.position() + " / " + totalToReceive);
 
                 //System.out.println(data.position() + " / " + data.size());
 

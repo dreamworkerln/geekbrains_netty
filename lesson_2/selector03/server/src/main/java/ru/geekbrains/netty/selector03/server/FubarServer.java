@@ -422,29 +422,29 @@ public class FubarServer implements Runnable {
             // wrote  >  0  - wrote some data
             // wrote  =  0  - no data written    // need register(selector, SelectionKey.OP_WRITE, id);
 
-            int bufferRemaining = -1;
+            //int bufferRemaining = -1;
 
-            // пишем в сокет, пока есть что передавать
+            // пишем в сокет, пока есть что передавать в data
+            // и полностью опустошили buffer
             // и сокет принимает данные (не затопился)
-            while (data.position() < data.size()) {
+            do {
 
                 // Add header if absent
                 if (!connection.isTransmitHeaderPresent()) {
                     connection.writeHeader();
                 }
 
-                //  читаем из канала в буффер
+                //  читаем из канала данных в буффер
                 dataRead = data.read(buffer);
                 buffer.flip();
+
 
                 // пишем в сокет
                 wrote = client.write(buffer);
 
-                bufferRemaining = buffer.remaining();
 
-//                if (buffer.remaining() > 0) {
-//                    System.out.println(buffer.remaining() );
-//                }
+                // уменьшаем количество оставшихся байт сообщения для записи
+                connection.decreaseRemainingBytesToWrite(wrote);
 
 
                 if (!someDataHasSend) {
@@ -455,13 +455,16 @@ public class FubarServer implements Runnable {
                 buffer.compact();
 
                 // socket stall
+                // если после compact position не на 0
+                // значит не смогли все содержимое буфера записать в сокет
                 // оставляем сокет в покое
-                if (bufferRemaining > 0) {
+                if (buffer.position() > 0) {
                     //System.out.println("WR: " + wrote);
                     break;
                 }
-
             }
+            while (connection.remainingBytesToWrite() > 0);
+
 
             // -------------------------------------------------
             // Если хоть что-то передалось - refresh client TTL
@@ -484,11 +487,9 @@ public class FubarServer implements Runnable {
             // он не успевает передавать тут / принимать на удаленном конце
             // регистрируемся на флаг что удаленный сокет может принимать сообщения
             // чтобы возобновить передачу как сокет будет готов передавать
-            if (data.position() < data.size() ||
-                bufferRemaining > 0) {
+            if (connection.remainingBytesToWrite() > 0) {
 
                 // Сохранить непереданный кусок данных для следущего цикла передачи
-                // отмотаем transmitChannel назад на размер данных в буффере (которые не передались)
 
                 //System.out.println(data.position() + " / " + data.size());
 
@@ -502,6 +503,14 @@ public class FubarServer implements Runnable {
             // -------------------------------------------------------------------------
             // Все успешно записалось, data.position == data.size
             else {
+
+                System.out.println("------------------------------");
+                System.out.println("ID: " + id);
+                System.out.println("BUFFER: " + buffer + " rem ");
+                System.out.println("DATA: " + data.position() + "/" + data.size());
+                System.out.println("CONN.REM: " + connection.remainingBytesToWrite());
+                System.out.println("------------------------------");
+
 
                 // возвращаем обратно возможность писать заголовок для нового сообщения
                 // восстанавливаем новый цикл записи сообщений
