@@ -36,7 +36,9 @@ public class FubarClient implements Runnable {
 
         // Будут проблемы с путями
         dataRoot = System.getProperty("user.dir") + "/data/";  //(? File.separator)
-        Files.createDirectories(Paths.get(dataRoot));
+        try {
+            Files.createDirectories(Paths.get(dataRoot));
+        }catch (Exception ignore){};
 
         // in blocking mode
         socketChannel = SocketChannel.open();
@@ -266,7 +268,7 @@ public class FubarClient implements Runnable {
                 // пока все не пролезет или не упадем
                 client.write(buffer);
 
-                //System.out.println("Tx: " + data.position() + " / " + data.size());
+                System.out.println("Tx: " + data.position() + " / " + data.size());
             }
             while (data.position() < data.size());
 
@@ -440,9 +442,15 @@ public class FubarClient implements Runnable {
 
     public static void main(String[] args) throws IOException {
 
-        Thread t = new Thread(new FubarClient());
-        //t.setDaemon(false);
-        t.start();
+        try {
+
+            Thread t = new Thread(new FubarClient());
+            //t.setDaemon(false);
+            t.start();
+        }
+        catch (Exception e) {
+            e.printStackTrace();
+        }
     }
 
 

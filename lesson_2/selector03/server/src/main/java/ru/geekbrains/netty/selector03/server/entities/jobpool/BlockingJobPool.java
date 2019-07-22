@@ -26,10 +26,7 @@ import java.util.function.Supplier;
  */
 public class BlockingJobPool<T> extends BaseJobPool {
 
-    private int queueSize;
-
-
-
+    //private int queueSize;
     //private Semaphore semaphore;
 
     // ThreadPoolExecutor.getActiveCount() precious replacement
@@ -43,11 +40,10 @@ public class BlockingJobPool<T> extends BaseJobPool {
     /**
      * Pool of worker threads
      * @param poolSize pool size (count of threads)
+     * @param queueSize job queue size (max count of queued jobs)
      * @param callback handler onComplete event
      */
-    public BlockingJobPool(int poolSize, Consumer<T> callback) {
-
-        queueSize = poolSize*2;
+    public BlockingJobPool(int poolSize, int queueSize, Consumer<T> callback) {
 
         final CustomizableThreadFactory threadFactory = new CustomizableThreadFactory();
         threadFactory.setDaemon(true);
@@ -70,6 +66,16 @@ public class BlockingJobPool<T> extends BaseJobPool {
         this.callback = callback;
 
         //semaphore = new Semaphore(poolSize, true);
+    }
+
+
+    /**
+     * Pool of worker threads
+     * @param poolSize pool size (count of threads)
+     * @param callback handler onComplete event
+     */
+    public BlockingJobPool(int poolSize, Consumer<T> callback) {
+        this(poolSize, poolSize, callback);
     }
 
     /**

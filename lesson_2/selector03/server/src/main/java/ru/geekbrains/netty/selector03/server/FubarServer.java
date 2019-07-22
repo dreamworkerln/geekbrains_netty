@@ -46,7 +46,7 @@ public class FubarServer implements Runnable {
 
     private ConnectionList connectionList = new ConnectionList();
 
-    private BlockingJobPool<Void> jobPool =  new BlockingJobPool<>(4, this::onDone);
+    private BlockingJobPool<Void> jobPool =  new BlockingJobPool<>(4, 8, this::onDone);
 
     private static final int PORT_NUMBER = 8000;
     private static final String IP = "0.0.0.0";
